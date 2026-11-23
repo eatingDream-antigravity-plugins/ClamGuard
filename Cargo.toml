@@ -4,7 +4,6 @@ version = "1.0.0"
 edition = "2021"
 description = "Native macOS clamshell performance throttling, display thermal guard, built-in brightness control, and MCP dashboard"
 license = "MIT"
-homepage = "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp"
 repository = "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp"
 keywords = ["macos", "apple-silicon", "clamshell", "brightness", "mcp"]
 categories = ["command-line-utilities", "os::macos-apis"]

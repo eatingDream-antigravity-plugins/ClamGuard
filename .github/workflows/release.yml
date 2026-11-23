@@ -63,7 +63,7 @@ jobs:
   package-macos:
     name: Build & upload plugin tarball (${{ matrix.target }})
     needs: ensure-release
-    runs-on: macos-14
+    runs-on: macos-latest
     permissions:
       contents: write
     strategy:
