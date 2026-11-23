@@ -106,12 +106,12 @@ Everything runs 100% locally on your Mac with zero network requests and no telem
 
 ## Build from source
 
-Requires macOS, Rust (`cargo`), and Node.js 20+ (only to pack and test the panel; no npm install needed).
+Requires macOS, Rust (`cargo`), and Node.js 20+ (to bundle and test the panel).
 
 ```sh
 git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
 cd mac-clamshell-mcp
-node panel/pack.mjs && node --test panel/test/panel.test.mjs
+(cd panel && npm install) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
 cargo test --locked
 cargo build --release --locked
 ./scripts/install-plugin.sh

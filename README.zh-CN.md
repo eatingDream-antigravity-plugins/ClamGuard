@@ -106,12 +106,12 @@ mac-clamshell-mcp watch --daemon --interval 10
 
 ## 从源码构建
 
-需要 macOS、Rust（`cargo`）和 Node.js 20+（仅用于打包和测试前端面板，无需 `npm install`）。
+需要 macOS、Rust（`cargo`）和 Node.js 20+（用于打包和测试前端面板）。
 
 ```sh
 git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
 cd mac-clamshell-mcp
-node panel/pack.mjs && node --test panel/test/panel.test.mjs
+(cd panel && npm install) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
 cargo test --locked
 cargo build --release --locked
 ./scripts/install-plugin.sh
