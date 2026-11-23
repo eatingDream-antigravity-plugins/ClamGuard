@@ -1,0 +1,18 @@
+{
+  "mac-clamshell-mcp": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "./bin/mac-clamshell-mcp hook session-start --data-dir \"$PLUGIN_DATA\"",
+        "timeout": 5
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "./bin/mac-clamshell-mcp hook pre-invocation --data-dir \"$PLUGIN_DATA\"",
+        "timeout": 5
+      }
+    ]
+  }
+}

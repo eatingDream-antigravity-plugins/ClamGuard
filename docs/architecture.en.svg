@@ -1,0 +1,168 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 620" width="1120" height="620" role="img" aria-labelledby="t d" font-family="-apple-system,'SF Pro Text','PingFang SC','Noto Sans CJK SC',BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+  <title id="t">Mac Clamshell MCP Architecture</title>
+  <desc id="d">macOS hardware probes and native DisplayServices/CoreGraphics FFI feed the Rust policy and display thermal guard engine, exposing CLI, hooks, LaunchAgent daemon, and a low-bandwidth SEP-1865 MCP Apps dashboard.</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#D97757"/>
+    </marker>
+    <marker id="ad" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,1 L9,5 L0,9 z" fill="#78736A"/>
+    </marker>
+    <radialGradient id="glow" cx="12%" cy="8%" r="55%">
+      <stop offset="0%" stop-color="#D97757" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#141311" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1119" height="619" rx="20" fill="#141311" stroke="#FFF8EE" stroke-opacity="0.10"/>
+  <rect x="1" y="1" width="1118" height="618" rx="19.5" fill="url(#glow)"/>
+
+  <text x="560" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#F4F1EA" letter-spacing="-0.2">Mac Clamshell MCP · Native Rust Clamshell Control &amp; MCP Architecture</text>
+  <text x="560" y="56" text-anchor="middle" font-size="12" fill="#A39E93">Single stripped macOS binary · Direct CoreGraphics &amp; DisplayServices FFI · Zero-flicker SEP-1865 dashboard</text>
+
+  <!-- Column 1: macOS Hardware & FFI -->
+  <rect x="28" y="76" width="244" height="334" rx="15" fill="#1A1916" stroke="#D97757" stroke-opacity="0.35"/>
+  <text x="150" y="102" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E5896B">1 · macOS Hardware &amp; FFI</text>
+
+  <rect x="40" y="116" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="40" y="116" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="55" y="140" font-size="13.5" font-weight="650" fill="#F4F1EA">Lid &amp; Power Probes</text>
+  <text x="55" y="159" font-size="11.5" fill="#A39E93">IOKit clamshell · pmset AC/batt</text>
+
+  <rect x="40" y="186" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="40" y="186" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="55" y="210" font-size="13.5" font-weight="650" fill="#F4F1EA">Thermal Pressure</text>
+  <text x="55" y="229" font-size="11.5" fill="#A39E93">pmset -g therm · bounded timeout</text>
+
+  <rect x="40" y="256" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="40" y="256" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="55" y="280" font-size="13.5" font-weight="650" fill="#F4F1EA">Display FFI (dlopen)</text>
+  <text x="55" y="299" font-size="11.5" fill="#A39E93">CoreGraphics · DisplayServices</text>
+
+  <rect x="40" y="326" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="40" y="326" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="55" y="350" font-size="13.5" font-weight="650" fill="#F4F1EA">CPU &amp; Mach Telemetry</text>
+  <text x="55" y="369" font-size="11.5" fill="#A39E93">sysctl P/E cores · host_statistics64</text>
+
+  <line x1="275" y1="243" x2="297" y2="243" stroke="#D97757" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Column 2: Policy & Guard Core -->
+  <rect x="302" y="76" width="244" height="334" rx="15" fill="#1A1916" stroke="#D4A14B" stroke-opacity="0.35"/>
+  <text x="424" y="102" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E3B663">2 · Policy &amp; Guard Core</text>
+
+  <rect x="314" y="116" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="314" y="116" width="4.5" height="58" rx="2.25" fill="#D4A14B"/>
+  <text x="329" y="140" font-size="13.5" font-weight="650" fill="#F4F1EA">policy.rs</text>
+  <text x="329" y="159" font-size="11.5" fill="#A39E93">Normal · Utility · Eco · Strict</text>
+
+  <rect x="314" y="186" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="314" y="186" width="4.5" height="58" rx="2.25" fill="#D4A14B"/>
+  <text x="329" y="210" font-size="13.5" font-weight="650" fill="#F4F1EA">guard.rs</text>
+  <text x="329" y="229" font-size="11.5" fill="#A39E93">0% dim + sleep · wake-restore sync</text>
+
+  <rect x="314" y="256" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="314" y="256" width="4.5" height="58" rx="2.25" fill="#D4A14B"/>
+  <text x="329" y="280" font-size="13.5" font-weight="650" fill="#F4F1EA">state.rs</text>
+  <text x="329" y="299" font-size="11.5" fill="#A39E93">Atomic 0600 · O_NOFOLLOW flock</text>
+
+  <rect x="314" y="326" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="314" y="326" width="4.5" height="58" rx="2.25" fill="#D4A14B"/>
+  <text x="329" y="350" font-size="13.5" font-weight="650" fill="#F4F1EA">runner.rs</text>
+  <text x="329" y="369" font-size="11.5" fill="#A39E93">taskpolicy · nice · 10 env caps</text>
+
+  <line x1="549" y1="243" x2="571" y2="243" stroke="#D97757" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Column 3: Execution Surfaces -->
+  <rect x="576" y="76" width="244" height="334" rx="15" fill="#1A1916" stroke="#4E9F72" stroke-opacity="0.35"/>
+  <text x="698" y="102" text-anchor="middle" font-size="13.5" font-weight="700" fill="#6BBF8E">3 · Runtime Surfaces</text>
+
+  <rect x="588" y="116" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="588" y="116" width="4.5" height="58" rx="2.25" fill="#4E9F72"/>
+  <text x="603" y="140" font-size="13.5" font-weight="650" fill="#F4F1EA">MCP Stdio Server</text>
+  <text x="603" y="159" font-size="11.5" fill="#A39E93">Pre-warm + SWR · &lt;0.5 ms SSR</text>
+
+  <rect x="588" y="186" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="588" y="186" width="4.5" height="58" rx="2.25" fill="#4E9F72"/>
+  <text x="603" y="210" font-size="13.5" font-weight="650" fill="#F4F1EA">Lifecycle Hooks</text>
+  <text x="603" y="229" font-size="11.5" fill="#A39E93">~1–3 ms · silent {} on normal</text>
+
+  <rect x="588" y="256" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="588" y="256" width="4.5" height="58" rx="2.25" fill="#4E9F72"/>
+  <text x="603" y="280" font-size="13.5" font-weight="650" fill="#F4F1EA">Display Guard Watch</text>
+  <text x="603" y="299" font-size="11.5" fill="#A39E93">LaunchAgent · fail-safe retries</text>
+
+  <rect x="588" y="326" width="220" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="588" y="326" width="4.5" height="58" rx="2.25" fill="#4E9F72"/>
+  <text x="603" y="350" font-size="13.5" font-weight="650" fill="#F4F1EA">Native CLI</text>
+  <text x="603" y="369" font-size="11.5" fill="#A39E93">status · run · brightness · watch</text>
+
+  <line x1="823" y1="243" x2="845" y2="243" stroke="#D97757" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Column 4: Agent & MCP Dashboard -->
+  <rect x="850" y="76" width="242" height="334" rx="15" fill="#1A1916" stroke="#D97757" stroke-opacity="0.45"/>
+  <text x="971" y="102" text-anchor="middle" font-size="13.5" font-weight="700" fill="#E5896B">4 · Agent &amp; Dashboard</text>
+
+  <rect x="862" y="116" width="218" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="862" y="116" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="877" y="140" font-size="13.5" font-weight="650" fill="#F4F1EA">SEP-1865 Panel HTML</text>
+  <text x="877" y="159" font-size="11.5" fill="#A39E93">&lt;38 KiB · dark-first · bg guard</text>
+
+  <rect x="862" y="186" width="218" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="862" y="186" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="877" y="210" font-size="13.5" font-weight="650" fill="#F4F1EA">Low-Bandwidth Sync</text>
+  <text x="877" y="229" font-size="11.5" fill="#A39E93">SHA-256 ETag · RTT polling</text>
+
+  <rect x="862" y="256" width="218" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="862" y="256" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="877" y="280" font-size="13.5" font-weight="650" fill="#F4F1EA">Progressive Disclosure</text>
+  <text x="877" y="299" font-size="11.5" fill="#A39E93">AGENTS.md &lt;400 B · SKILL.md</text>
+
+  <rect x="862" y="326" width="218" height="58" rx="10" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <rect x="862" y="326" width="4.5" height="58" rx="2.25" fill="#D97757"/>
+  <text x="877" y="350" font-size="13.5" font-weight="650" fill="#F4F1EA">MCP Tool Split</text>
+  <text x="877" y="369" font-size="11.5" fill="#A39E93">2 model+app · 2 app-only</text>
+
+  <!-- Bottom Strip Left: 4-Tier Policy Matrix -->
+  <rect x="28" y="438" width="680" height="154" rx="14" fill="#181714" stroke="#FFF8EE" stroke-opacity="0.14" stroke-dasharray="5 4"/>
+  <text x="44" y="462" font-size="12.5" font-weight="700" fill="#F4F1EA">Adaptive Policy Tier Matrix · Live Hardware → Scheduler &amp; Concurrency Caps</text>
+
+  <rect x="44" y="476" width="154" height="100" rx="10" fill="#1C1B18" stroke="#4E9F72" stroke-opacity="0.45"/>
+  <text x="58" y="498" font-size="13" font-weight="700" fill="#4E9F72">Normal</text>
+  <text x="58" y="517" font-size="11" fill="#F4F1EA">Lid open · therm OK</text>
+  <text x="58" y="537" font-size="10.5" fill="#A39E93">Unrestricted QoS</text>
+  <text x="58" y="555" font-size="10.5" fill="#A39E93">All logical cores</text>
+
+  <rect x="209" y="476" width="154" height="100" rx="10" fill="#1C1B18" stroke="#D4A14B" stroke-opacity="0.45"/>
+  <text x="223" y="498" font-size="13" font-weight="700" fill="#D4A14B">Utility</text>
+  <text x="223" y="517" font-size="11" fill="#F4F1EA">Lid closed + AC</text>
+  <text x="223" y="537" font-size="10.5" fill="#A39E93">taskpolicy -c utility</text>
+  <text x="223" y="555" font-size="10.5" fill="#A39E93">nice 10 · E-cores 2..4</text>
+
+  <rect x="374" y="476" width="154" height="100" rx="10" fill="#1C1B18" stroke="#D97757" stroke-opacity="0.50"/>
+  <text x="388" y="498" font-size="13" font-weight="700" fill="#D97757">Eco</text>
+  <text x="388" y="517" font-size="11" fill="#F4F1EA">Lid closed + Battery</text>
+  <text x="388" y="537" font-size="10.5" fill="#A39E93">taskpolicy -c background</text>
+  <text x="388" y="555" font-size="10.5" fill="#A39E93">nice 15 · ≤2 (1 if ≤20%)</text>
+
+  <rect x="539" y="476" width="154" height="100" rx="10" fill="#1C1B18" stroke="#D95F59" stroke-opacity="0.50"/>
+  <text x="553" y="498" font-size="13" font-weight="700" fill="#D95F59">Strict</text>
+  <text x="553" y="517" font-size="11" fill="#F4F1EA">Thermal warning</text>
+  <text x="553" y="537" font-size="10.5" fill="#A39E93">taskpolicy -b (I/O cap)</text>
+  <text x="553" y="555" font-size="10.5" fill="#A39E93">nice 19 · max_jobs = 1</text>
+
+  <!-- Bottom Strip Right: Security & Release Pipeline -->
+  <rect x="728" y="438" width="364" height="154" rx="14" fill="#181714" stroke="#FFF8EE" stroke-opacity="0.14" stroke-dasharray="5 4"/>
+  <text x="744" y="462" font-size="12.5" font-weight="700" fill="#F4F1EA">Security Boundary &amp; Automated Release CI</text>
+
+  <rect x="744" y="476" width="332" height="44" rx="9" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <text x="758" y="495" font-size="12" font-weight="650" fill="#F4F1EA">Local-Only · Zero Outbound Network</text>
+  <text x="758" y="511" font-size="10.5" fill="#A39E93">0700 dir · 0600 atomic state · default-src 'none' CSP</text>
+
+  <rect x="744" y="532" width="332" height="44" rx="9" fill="#1C1B18" stroke="#FFF8EE" stroke-opacity="0.09"/>
+  <text x="758" y="551" font-size="12" font-weight="650" fill="#F4F1EA">GitHub Actions · Release Please + macOS Tarballs</text>
+  <text x="758" y="567" font-size="10.5" fill="#A39E93">arm64 &amp; x86_64 · path-remapped Rust · SHA-256 · gitleaks</text>
+
+  <!-- Subtle Dashed Vertical Connectors -->
+  <line x1="424" y1="437" x2="424" y2="414" stroke="#78736A" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#ad)"/>
+  <line x1="910" y1="437" x2="910" y2="414" stroke="#78736A" stroke-width="1.6" stroke-dasharray="4 3" marker-end="url(#ad)"/>
+</svg>

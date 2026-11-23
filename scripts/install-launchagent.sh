@@ -1,0 +1,129 @@
+#!/bin/sh
+# Install and load the Mac Clamshell MCP LaunchAgent (`dev.mac-clamshell-mcp.display-guard`).
+# Usage: ./scripts/install-launchagent.sh [--bin /path/to/mac-clamshell-mcp] [--data-dir /path/to/data] [--interval 10]
+
+set -eu
+
+LABEL="dev.mac-clamshell-mcp.display-guard"
+INTERVAL="10"
+DATA_DIR="${MAC_CLAMSHELL_DATA_DIR:-${HOME}/.gemini/antigravity/plugin_data/mac-clamshell-mcp}"
+BIN_PATH=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bin)
+      if [ $# -lt 2 ]; then
+        printf 'install-launchagent: --bin requires a path\n' >&2
+        exit 2
+      fi
+      BIN_PATH="$2"
+      shift 2
+      ;;
+    --data-dir)
+      if [ $# -lt 2 ]; then
+        printf 'install-launchagent: --data-dir requires a path\n' >&2
+        exit 2
+      fi
+      DATA_DIR="$2"
+      shift 2
+      ;;
+    --interval)
+      if [ $# -lt 2 ]; then
+        printf 'install-launchagent: --interval requires an integer >= 2\n' >&2
+        exit 2
+      fi
+      INTERVAL="$2"
+      shift 2
+      ;;
+    -h|--help)
+      printf 'Usage: %s [--bin /path/to/mac-clamshell-mcp] [--data-dir /path/to/data] [--interval 10]\n' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'Unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+case "$INTERVAL" in
+  ''|*[!0-9]*)
+    printf 'install-launchagent: --interval must be an integer >= 2\n' >&2
+    exit 2
+    ;;
+esac
+if [ "$INTERVAL" -lt 2 ]; then
+  printf 'install-launchagent: --interval must be >= 2\n' >&2
+  exit 2
+fi
+
+if [ -z "$BIN_PATH" ]; then
+  if [ -x "${HOME}/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp" ]; then
+    BIN_PATH="${HOME}/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp"
+  elif command -v mac-clamshell-mcp >/dev/null 2>&1; then
+    BIN_PATH="$(command -v mac-clamshell-mcp)"
+  else
+    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    BIN_PATH="${SCRIPT_DIR}/../target/release/mac-clamshell-mcp"
+  fi
+fi
+
+if [ ! -x "$BIN_PATH" ]; then
+  printf 'install-launchagent: executable not found at %s\n' "$BIN_PATH" >&2
+  exit 1
+fi
+
+case "${BIN_PATH}${DATA_DIR}" in
+  *'<'*|*'>'*|*'&'*|*'"'*)
+    printf 'install-launchagent: paths must not contain XML special characters\n' >&2
+    exit 2
+    ;;
+esac
+
+AGENTS_DIR="${HOME}/Library/LaunchAgents"
+LOG_DIR="${DATA_DIR}/logs"
+PLIST_PATH="${AGENTS_DIR}/${LABEL}.plist"
+mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+chmod 0700 "$DATA_DIR" "$LOG_DIR"
+
+cat > "$PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${BIN_PATH}</string>
+    <string>watch</string>
+    <string>--data-dir</string>
+    <string>${DATA_DIR}</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>${INTERVAL}</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>LowPriorityBackgroundIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/display-guard.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/display-guard.err.log</string>
+</dict>
+</plist>
+EOF
+
+/usr/bin/plutil -lint "$PLIST_PATH" >/dev/null
+
+UID_NUM="$(id -u)"
+launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
+launchctl bootstrap "gui/${UID_NUM}" "$PLIST_PATH"
+launchctl kickstart -k "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true
+printf 'Installed and loaded %s -> %s\n' "$PLIST_PATH" "$BIN_PATH"

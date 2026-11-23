@@ -1,0 +1,11 @@
+/target
+node_modules/
+panel/node_modules/
+.DS_Store
+*.swp
+*.bak*
+*.log
+*.pid
+*.sock
+*.sqlite*
+.env*

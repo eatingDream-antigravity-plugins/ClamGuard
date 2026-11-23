@@ -1,0 +1,15 @@
+{
+  "name": "mac-clamshell-mcp",
+  "displayName": "Mac Clamshell MCP",
+  "version": "1.0.0",
+  "description": "Native Rust macOS clamshell performance throttling, display thermal guard, built-in brightness control, and low-bandwidth MCP dashboard.",
+  "author": "eatingDream",
+  "homepage": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
+  "repository": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "检查当前合盖状态、电源、温度与内建屏幕亮度，并展示 Mac Clamshell 生效策略",
+    "以合盖节能模式运行当前项目的构建或测试任务",
+    "调整 Mac Clamshell 的性能档位、并发上限或内建屏幕亮度"
+  ]
+}
