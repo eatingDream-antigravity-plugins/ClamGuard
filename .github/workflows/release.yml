@@ -63,7 +63,7 @@ jobs:
   package-macos:
     name: Build & upload macOS tarballs (arm64 + x86_64)
     needs: ensure-release
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     permissions:
       contents: write
     env:
