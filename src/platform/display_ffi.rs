@@ -434,17 +434,14 @@ mod tests {
     }
 
     #[test]
-    fn clamp_percent_validates_and_clamps() {
+    fn clamp_percent_and_mock_lock_screen() {
         assert_eq!(clamp_percent(-10.0).unwrap(), 0);
         assert_eq!(clamp_percent(0.0).unwrap(), 0);
         assert_eq!(clamp_percent(49.6).unwrap(), 50);
         assert_eq!(clamp_percent(150.0).unwrap(), 100);
         assert!(clamp_percent(f64::NAN).is_err());
         assert!(clamp_percent(f64::INFINITY).is_err());
-    }
 
-    #[test]
-    fn mock_lock_screen_sets_locked_state_and_supports_error_mode() {
         let _guard = mock_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let prev_disp = std::env::var("MAC_CLAMSHELL_MOCK_DISPLAY").ok();
 
