@@ -10,29 +10,19 @@ description: >-
 
 # Mac Clamshell MCP — Throttling & Display Control
 
-The `mac-clamshell-mcp` plugin ships a native Rust binary (`~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp`) that inspects macOS lid state (`AppleClamshellState`), power source (`AC` vs `Battery`), thermal limits (`pmset -g therm`), and built-in display brightness (`DisplayServices`).
+Binary: `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp` (written `mac-clamshell-mcp` below; invoke the full path if not on `$PATH`).
 
 ## Activation
 
-- **Normal (`profile=normal`, or no active `[mac-clamshell]` throttle notice)**: Operate normally without artificial throttling. Before starting an unusually heavy job (full native compile, ML training, video encode), you may check `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp status` if unsure of the current lid state.
-- **Throttled (`profile=utility`, `profile=eco`, or `profile=strict`)**: Follow the controls below until a subsequent notice reports `profile=normal`.
+- **Normal (`profile=normal` or no `[mac-clamshell]` notice)**: Operate normally without throttling. Before unusually heavy jobs (full compiles, ML training, video encodes), check `mac-clamshell-mcp status` if lid state is uncertain.
+- **Throttled (`utility`, `eco`, or `strict`)**: Apply the rules below until a later notice reports `profile=normal`.
 
-## Performance-Control Rules (While Throttled)
+## Rules While Throttled
 
-1. **Wrap heavy shell commands with `mac-clamshell-mcp run`**
-   - Single command: `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp run -- <cmd> [args...]`
-   - Compound command (`&&`, `|`, redirects): `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp run --sh "<cmd>"`
-   - `mac-clamshell-mcp run` re-checks live lid/power/thermal state at launch and applies `taskpolicy` (`-c utility` / `-c background` / `-b`), `nice`, and concurrency env vars (`MAKEFLAGS`, `CARGO_BUILD_JOBS`, `CMAKE_BUILD_PARALLEL_LEVEL`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `RAYON_NUM_THREADS`, `UV_THREADPOOL_SIZE`, `GOMAXPROCS`).
-   - Also pass tool-specific concurrency flags matching `max_jobs` when applicable (e.g., `jest --maxWorkers=<N>`, `vitest --maxWorkers=<N>`, `go test -p <N>`, `xcodebuild -jobs <N>`, `pnpm --workspace-concurrency=<N>`).
-   - **Skip wrapping** for quick lightweight commands (`ls`, `git status`, `git diff`, `cat`, `rg` on small scopes) and **never alter** exact pre-authorized commands required by scheduled automations.
-
-2. **Profile Tiers**
-   - **`utility` (lid closed + AC power)**: `taskpolicy -c utility`, `nice 10`, cap concurrency to `max_jobs` (E-core count clamped `2..4`); run at most 1 heavy build/test command at a time.
-   - **`eco` (lid closed + Battery power)**: Strict E-core execution (`taskpolicy -c background`, `nice 15`, `max_jobs <= 2`, or `1` when battery `<= 20%`). Execute sequentially, prefer targeted/incremental builds & tests, and avoid parallel heavy fan-outs.
-   - **`strict` (thermal warning / throttle detected)**: `taskpolicy -b`, `nice 19`, `max_jobs=1`. Do not start new heavy compute tasks without alerting the user and letting the machine cool down first.
-
-3. **Display Brightness, Lock Screen & User Override**
-   - Use the `clamshell_set_brightness` MCP tool or `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp brightness set <0..100>` to adjust built-in display brightness; while the lid is closed, Mac Clamshell MCP safely updates the wake-restore target without lighting the closed panel.
-   - Use the `clamshell_lock_screen` MCP tool (only when explicitly requested by the user) or `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp lock` to lock the macOS screen immediately without putting the Mac to sleep.
-   - Use the `clamshell_panel` MCP tool to open the live dashboard or inspect hardware/policy status.
-   - If the user explicitly requests full performance for a specific task, follow their instruction and briefly note that throttling was bypassed for that run.
+- **Wrap heavy commands**: `mac-clamshell-mcp run -- <cmd> [args...]` (single command) or `mac-clamshell-mcp run --sh "<cmd>"` (pipes, `&&`, redirects). It re-checks live lid/power/thermal state and sets `taskpolicy`, `nice`, and standard build/thread concurrency env vars automatically. Also pass matching tool flags (`--maxWorkers`, `-p`, `-jobs`, `--workspace-concurrency`) when applicable.
+- **Skip wrapping** quick lightweight commands (`ls`, `git status`, `git diff`, `cat`, small `rg`) and **never alter** exact pre-authorized commands in scheduled automations.
+- **Profile tiers**:
+  - `utility` (lid closed + AC): `taskpolicy -c utility`, `nice 10`, `max_jobs` = E-cores clamped `2..4`; at most 1 heavy build/test at a time.
+  - `eco` (lid closed + Battery): `taskpolicy -c background`, `nice 15`, `max_jobs <= 2` (`1` at `<= 20%` battery); run sequentially, prefer incremental builds/tests, avoid parallel fan-outs.
+  - `strict` (thermal warning/throttle): `taskpolicy -b`, `nice 19`, `max_jobs=1`; do not start new heavy compute without alerting the user and letting the Mac cool down.
+- **Tools & user overrides**: Use `clamshell_panel` for status/dashboard, `clamshell_set_brightness` (or `brightness set <0..100>`, safely updates wake-restore target while closed), and `clamshell_lock_screen` (or `lock`, **only when explicitly requested**) to lock without sleeping. If the user explicitly asks for full speed on a task, comply and briefly note that throttling was bypassed.

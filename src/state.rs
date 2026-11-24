@@ -478,7 +478,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sha256_matches_nist_vectors() {
+    fn sha256_and_iso8601_helpers() {
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -488,12 +488,7 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(sha256_hex_16(b"abc"), "ba7816bf8f01cfea");
-    }
-
-    #[test]
-    fn iso8601_formats_epoch_and_known_date() {
         assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00.000Z");
-        // 2026-11-23T12:34:56.789Z = 1795437296789
         assert_eq!(
             format_iso8601_utc(1_700_000_000_123),
             "2023-11-14T22:13:20.123Z"
