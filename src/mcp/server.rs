@@ -8,7 +8,11 @@ use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+pub const DEFAULT_SERVE_GUARD_INTERVAL_MS: u64 = 5_000;
 
 pub fn handle_rpc_value<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     msg: &Value,
@@ -90,7 +94,31 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
         MacOsProbeBackend,
         MacOsDisplayBackend,
     ));
+    engine.set_bg_guard_active(true);
     let html_loader = Arc::new(HtmlLoader::new(panel_html_override));
+
+    // Spawn lightweight lock-coordinated Display Guard loop so closed-lid backlight protection,
+    // wake-restore, and optional thermal brightness cap work out-of-the-box whenever Antigravity is open.
+    let stop_guard = Arc::new(AtomicBool::new(false));
+    let guard_interval_ms = std::env::var("MAC_CLAMSHELL_GUARD_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SERVE_GUARD_INTERVAL_MS)
+        .clamp(100, 300_000);
+    let guard_handle = {
+        let e = Arc::clone(&engine);
+        let stop = Arc::clone(&stop_guard);
+        std::thread::Builder::new()
+            .name("clamshell-guard".into())
+            .spawn(move || {
+                let dur = Duration::from_millis(guard_interval_ms);
+                while !stop.load(Ordering::SeqCst) {
+                    e.run_background_guard_tick();
+                    e.wait_guard_interval(dur, &stop);
+                }
+            })
+            .ok()
+    };
 
     // Pre-warm HTML template and initial telemetry asynchronously so first open is <0.5ms.
     {
@@ -108,10 +136,17 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
     let stdout = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
     let mut line = String::new();
     let mut reader = stdin.lock();
+    let mut io_res = Ok(());
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line)?;
+        let n = match reader.read_line(&mut line) {
+            Ok(n) => n,
+            Err(e) => {
+                io_res = Err(e);
+                break;
+            }
+        };
         if n == 0 {
             break;
         }
@@ -137,13 +172,24 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
 
         if let Some(resp) = handle_rpc_value(&msg, &engine, &html_loader) {
             let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
-            serde_json::to_writer(&mut *out, &resp)?;
-            out.write_all(b"\n")?;
-            out.flush()?;
+            if let Err(e) = serde_json::to_writer(&mut *out, &resp)
+                .map_err(io::Error::other)
+                .and_then(|_| out.write_all(b"\n"))
+                .and_then(|_| out.flush())
+            {
+                io_res = Err(e);
+                break;
+            }
         }
     }
 
-    Ok(())
+    stop_guard.store(true, Ordering::SeqCst);
+    engine.notify_guard_wake();
+    if let Some(h) = guard_handle {
+        let _ = h.join();
+    }
+
+    io_res
 }
 
 #[cfg(test)]
@@ -180,7 +226,8 @@ mod tests {
                 battery_pct: Some(88),
                 battery_detail: "-InternalBattery-0\t88%; discharging".into(),
                 thermal_state: "ok".into(),
-                cpu_speed_limit_pct: 100,
+                thermal_pressure: "nominal".into(),
+                cpu_speed_limit_pct: None,
                 low_power_mode: "0".into(),
                 memory: MemorySummary {
                     total_gb: 16.0,
@@ -196,19 +243,27 @@ mod tests {
     }
 
     struct TestDisplay {
+        builtins: Vec<u32>,
         level: Mutex<f32>,
     }
     impl DisplayBackend for TestDisplay {
         fn get_displays(&self) -> (Vec<u32>, Vec<u32>) {
-            (vec![1], vec![])
+            (self.builtins.clone(), vec![])
         }
         fn is_asleep(&self, _id: u32) -> Option<bool> {
             Some(false)
         }
         fn get_brightness(&self, _id: u32) -> Option<f32> {
-            Some(*self.level.lock().unwrap())
+            if self.builtins.is_empty() {
+                None
+            } else {
+                Some(*self.level.lock().unwrap())
+            }
         }
         fn set_brightness(&self, _id: u32, level: f32) -> bool {
+            if self.builtins.is_empty() {
+                return false;
+            }
             *self.level.lock().unwrap() = level;
             true
         }
@@ -218,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_rpc_end_to_end_ssr_dedup_configure_and_brightness() {
+    fn mcp_rpc_end_to_end_ssr_dedup_configure_brightness_and_desktop_error() {
         let dir =
             std::env::temp_dir().join(format!("mac-clamshell-mcp-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -227,9 +282,11 @@ mod tests {
             "mac-clamshell-mcp".into(),
             TestProbe { lid_closed: true },
             TestDisplay {
+                builtins: vec![1],
                 level: Mutex::new(0.0),
             },
         ));
+        engine.set_bg_guard_active(true);
         let html_loader = HtmlLoader::new(None);
 
         let init = handle_rpc_value(
@@ -260,6 +317,11 @@ mod tests {
                 "clamshell_configure",
                 "clamshell_set_brightness"
             ]
+        );
+        // Verify guardEnabled is exposed in English tools/list schema
+        assert_eq!(
+            tools["result"]["tools"][2]["inputSchema"]["properties"]["guardEnabled"]["type"],
+            "boolean"
         );
 
         let res = handle_rpc_value(
@@ -311,9 +373,9 @@ mod tests {
             45
         );
 
-        // Configure policy updates profile and hash
+        // Configure policy + guardEnabled toggle updates profile, guardStatus, and hash
         let cfg = handle_rpc_value(
-            &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"clamshell_configure","arguments":{"modeOverride":"utility","maxJobsOverride":2}}}),
+            &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"clamshell_configure","arguments":{"modeOverride":"utility","maxJobsOverride":2,"guardEnabled":false}}}),
             &engine,
             &html_loader,
         )
@@ -322,10 +384,32 @@ mod tests {
             cfg["result"]["structuredContent"]["policy"]["profile"],
             "utility"
         );
+        assert_eq!(
+            cfg["result"]["structuredContent"]["guardStatus"],
+            "paused"
+        );
         assert_ne!(
             cfg["result"]["structuredContent"]["hash"].as_str().unwrap(),
             hash
         );
+
+        // Desktop Mac (open/unknown lid + no built-in display) returns explicit isError: true
+        let desktop_engine = Arc::new(TelemetryEngine::new(
+            dir.join("desktop"),
+            "mac-clamshell-mcp".into(),
+            TestProbe { lid_closed: false },
+            TestDisplay {
+                builtins: vec![],
+                level: Mutex::new(0.0),
+            },
+        ));
+        let desktop_err = handle_rpc_value(
+            &json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{"percent":50}}}),
+            &desktop_engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert_eq!(desktop_err["result"]["isError"], true);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,9 +1,14 @@
 use crate::guard::{
-    read_display_info, set_brightness_synced, BrightnessAction, DisplayGuardSummary, DisplayInfo,
+    read_display_info, run_guard_tick_locked, set_brightness_synced, BrightnessAction,
+    DisplayGuardSummary, DisplayInfo,
 };
+use crate::i18n::{detect_lang, parse_lang_tag, Lang};
+use crate::launchagent::plist_exists;
 use crate::platform::display_ffi::DisplayBackend;
 use crate::platform::macos::{MemorySummary, ProbeBackend};
-use crate::policy::{build_env_vars, compute_policy, CpuTopology, Policy};
+use crate::policy::{
+    build_env_vars, compute_policy, format_lid, format_power, format_thermal, CpuTopology, Policy,
+};
 use crate::state::{
     abbreviate_home, format_iso8601_utc, load_guard_state, load_guard_state_opt, now_epoch_ms,
     read_settings, settings_path, sha256_hex_16, write_settings, Settings, SettingsPatch,
@@ -12,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub const TELEMETRY_CACHE_TTL_MS: u64 = 2500;
 
@@ -44,6 +49,7 @@ pub struct TelemetryPaths {
 #[serde(rename_all = "camelCase")]
 pub struct TelemetrySnapshot {
     pub timestamp: String,
+    pub locale: String,
     pub host: HostTelemetry,
     pub lid_state: String,
     pub clamshell_causes_sleep: String,
@@ -51,7 +57,8 @@ pub struct TelemetrySnapshot {
     pub battery_pct: Option<u32>,
     pub battery_detail: String,
     pub thermal_state: String,
-    pub cpu_speed_limit_pct: u32,
+    pub thermal_pressure: String,
+    pub cpu_speed_limit_pct: Option<u32>,
     pub low_power_mode: String,
     pub cpu_topology: CpuTopology,
     pub settings: Settings,
@@ -59,6 +66,7 @@ pub struct TelemetrySnapshot {
     pub env_vars: BTreeMap<String, String>,
     pub display: DisplayInfo,
     pub display_guard: Option<DisplayGuardSummary>,
+    pub guard_status: String,
     pub degraded: bool,
     pub paths: TelemetryPaths,
     pub hash: String,
@@ -84,6 +92,7 @@ pub struct UnchangedPayload {
 
 pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
     let canonical = json!({
+        "locale": s.locale,
         "host": {
             "hostname": s.host.hostname,
             "chip": s.host.chip,
@@ -98,6 +107,7 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "batteryPct": s.battery_pct,
         "batteryDetail": s.battery_detail,
         "thermalState": s.thermal_state,
+        "thermalPressure": s.thermal_pressure,
         "cpuSpeedLimitPct": s.cpu_speed_limit_pct,
         "lowPowerMode": s.low_power_mode,
         "cpuTopology": s.cpu_topology,
@@ -106,6 +116,7 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "envVars": s.env_vars,
         "display": s.display,
         "displayGuard": s.display_guard,
+        "guardStatus": s.guard_status,
         "degraded": s.degraded,
     });
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
@@ -113,60 +124,113 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
 }
 
 pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
-    let lid_label = match s.lid_state.as_str() {
-        "closed" => "closed (合盖)",
-        "open" => "open (开盖)",
-        _ => "unknown",
-    };
-    let power_label = match (s.power_source.as_str(), s.battery_pct) {
-        ("battery", Some(p)) => format!("battery {p}%"),
-        ("battery", None) => "battery".to_string(),
-        ("ac", Some(p)) => format!("AC {p}%"),
-        ("ac", None) => "AC".to_string(),
-        _ => "unknown".to_string(),
-    };
+    let lang = parse_lang_tag(&s.locale).unwrap_or(Lang::En);
+    let lid_label = format_lid(&s.lid_state, lang);
+    let power_label = format_power(&s.power_source, s.battery_pct, lang);
+    let therm_label = format_thermal(
+        &s.thermal_state,
+        &s.thermal_pressure,
+        s.cpu_speed_limit_pct,
+        lang,
+    );
     let tp = if s.policy.taskpolicy.is_empty() {
         "none"
     } else {
         s.policy.taskpolicy.as_str()
     };
-    let mut lines = vec![
-        format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
-        format!(
-            "- Lid: {lid_label}, Power: {power_label}, Thermal: {} (CPU_Speed_Limit={}%)",
-            s.thermal_state, s.cpu_speed_limit_pct
-        ),
-        format!(
-            "- Active Policy: profile={} ({}), max_jobs={}, taskpolicy=\"{tp}\", nice={}",
-            s.policy.profile, s.policy.mode_source, s.policy.max_jobs, s.policy.nice_level
-        ),
-        format!(
-            "- Load Avg: {:.2} / {:.2} / {:.2}, Memory: {:.1}/{:.1} GB ({}%)",
-            s.host.load_avg[0],
-            s.host.load_avg[1],
-            s.host.load_avg[2],
-            s.host.memory.used_gb,
-            s.host.memory.total_gb,
-            s.host.memory.used_pct
-        ),
-    ];
-    if s.display.available {
-        let disp_desc = if s.display.mode == "saved_target" {
-            format!(
-                "lid closed (restore target {}%)",
-                s.display.saved_percent.unwrap_or(0)
-            )
-        } else if s.display.asleep {
-            format!(
-                "asleep (target {}%)",
-                s.display.saved_percent.or(s.display.percent).unwrap_or(0)
-            )
-        } else {
-            format!("{}% (awake)", s.display.percent.unwrap_or(0))
-        };
-        lines.push(format!("- Built-in Display: {disp_desc}"));
+
+    match lang {
+        Lang::ZhCn => {
+            let disp_desc = if s.display.available {
+                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                    let ext = if s.display.external_count > 0 {
+                        format!("（外接 {} 台）", s.display.external_count)
+                    } else {
+                        String::new()
+                    };
+                    format!("已合盖，恢复目标 {}%{ext}", s.display.saved_percent.unwrap_or(20))
+                } else if s.display.asleep {
+                    format!(
+                        "已熄屏，恢复目标 {}%",
+                        s.display.saved_percent.or(s.display.percent).unwrap_or(20)
+                    )
+                } else {
+                    format!("{}%（点亮）", s.display.percent.unwrap_or(0))
+                }
+            } else {
+                "未检测到内建屏幕".to_string()
+            };
+            let guard_desc = match s.guard_status.as_str() {
+                "protecting" => "熄屏保护中",
+                "thermal_cap" => "温控限亮中",
+                "armed" => "守护运行中",
+                "paused" => "已暂停",
+                _ => "空闲",
+            };
+            vec![
+                format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
+                format!("- 盒盖: {lid_label}，电源: {power_label}，温控: {therm_label}"),
+                format!(
+                    "- 生效策略: profile={} ({})，最高并发={}，taskpolicy=\"{tp}\"，nice={}",
+                    s.policy.profile, s.policy.mode_source, s.policy.max_jobs, s.policy.nice_level
+                ),
+                format!(
+                    "- 系统负载: {:.2} / {:.2} / {:.2}，内存: {:.1}/{:.1} GB ({}%)",
+                    s.host.load_avg[0],
+                    s.host.load_avg[1],
+                    s.host.load_avg[2],
+                    s.host.memory.used_gb,
+                    s.host.memory.total_gb,
+                    s.host.memory.used_pct
+                ),
+                format!("- 内建屏幕: {disp_desc}（守护: {guard_desc}）"),
+            ]
+            .join("\n")
+        }
+        Lang::En => {
+            let disp_desc = if s.display.available {
+                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                    let ext = if s.display.external_count > 0 {
+                        format!(" ({} external)", s.display.external_count)
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "closed, saved target {}%{ext}",
+                        s.display.saved_percent.unwrap_or(20)
+                    )
+                } else if s.display.asleep {
+                    format!(
+                        "asleep, saved target {}%",
+                        s.display.saved_percent.or(s.display.percent).unwrap_or(20)
+                    )
+                } else {
+                    format!("{}% (awake)", s.display.percent.unwrap_or(0))
+                }
+            } else {
+                "unavailable".to_string()
+            };
+            vec![
+                format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
+                format!("- Lid: {lid_label}, Power: {power_label}, Thermal: {therm_label}"),
+                format!(
+                    "- Active Policy: profile={} ({}), max_jobs={}, taskpolicy=\"{tp}\", nice={}",
+                    s.policy.profile, s.policy.mode_source, s.policy.max_jobs, s.policy.nice_level
+                ),
+                format!(
+                    "- Load Avg: {:.2} / {:.2} / {:.2}, Memory: {:.1}/{:.1} GB ({}%)",
+                    s.host.load_avg[0],
+                    s.host.load_avg[1],
+                    s.host.load_avg[2],
+                    s.host.memory.used_gb,
+                    s.host.memory.total_gb,
+                    s.host.memory.used_pct
+                ),
+                format!("- Built-in Display: {disp_desc} (guard: {})", s.guard_status),
+            ]
+            .join("\n")
+        }
     }
-    lines.join("\n")
 }
 
 struct CachedEntry {
@@ -221,6 +285,8 @@ pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
     display: D,
     cache_ttl_ms: u64,
     settings_gen: AtomicU64,
+    bg_guard_active: AtomicBool,
+    guard_wake: (Mutex<u64>, Condvar),
     state: Mutex<Coalescer>,
 }
 
@@ -243,10 +309,43 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             display,
             cache_ttl_ms,
             settings_gen: AtomicU64::new(0),
+            bg_guard_active: AtomicBool::new(false),
+            guard_wake: (Mutex::new(0), Condvar::new()),
             state: Mutex::new(Coalescer {
                 cache: None,
                 in_flight: None,
             }),
+        }
+    }
+
+    pub fn set_bg_guard_active(&self, active: bool) {
+        self.bg_guard_active.store(active, Ordering::SeqCst);
+        self.invalidate_cache();
+    }
+
+    pub fn notify_guard_wake(&self) {
+        let (lock, cvar) = &self.guard_wake;
+        let mut seq = lock_unpoisoned(lock);
+        *seq = seq.wrapping_add(1);
+        cvar.notify_all();
+    }
+
+    pub fn wait_guard_interval(&self, dur: Duration, stop: &AtomicBool) {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let (lock, cvar) = &self.guard_wake;
+        let guard = lock_unpoisoned(lock);
+        let cur = *guard;
+        let _ = cvar.wait_timeout_while(guard, dur, |seq| {
+            *seq == cur && !stop.load(Ordering::SeqCst)
+        });
+    }
+
+    /// Execute one lock-coordinated Display Guard tick using this engine's probe + display backends.
+    pub fn run_background_guard_tick(&self) {
+        if let Ok(Some(true)) = run_guard_tick_locked(&self.data_dir, &self.probe, &self.display) {
+            self.invalidate_cache();
         }
     }
 
@@ -263,6 +362,10 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     pub fn configure(&self, patch: &SettingsPatch) -> Result<CollectedTelemetry, String> {
         write_settings(&self.data_dir, patch)
             .map_err(|e| format!("failed to write settings: {e}"))?;
+        if patch.guard_enabled.is_some() || patch.thermal_bright_cap_pct.is_some() {
+            self.run_background_guard_tick();
+            self.notify_guard_wake();
+        }
         self.invalidate_cache();
         Ok(self.collect(true))
     }
@@ -318,11 +421,6 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         snapshot
     }
 
-    /// Stale-While-Revalidate (SWR) read for zero-block first paint (`resources/read`, `clamshell_panel`):
-    /// - Fresh cache hit: returns immediately (`stale: false`, `0 ms`).
-    /// - Stale cache hit (even hours after boot): returns cached snapshot immediately (`stale: true`,
-    ///   `0 ms`) AND triggers a single-flight background refresh if none is running for `req_gen`.
-    /// - Cold start (only before initial startup pre-warm completes): coalesces onto live `collect`.
     #[allow(dead_code)]
     pub fn collect_swr(self: &Arc<Self>) -> CollectedTelemetry
     where
@@ -427,8 +525,6 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                 }
             }
 
-            // Strict single-flight coalescing: even concurrent `force=true` callers share the
-            // currently running OS probe batch if settings_gen has not advanced.
             if let Some(ref existing) = guard.in_flight {
                 let slot_gen = lock_unpoisoned(&existing.0).gen;
                 if slot_gen == req_gen {
@@ -477,7 +573,6 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                 };
             }
             drop(st);
-            // Leader aborted unexpectedly: run a direct fallback probe without panicking.
             return CollectedTelemetry {
                 snapshot: Arc::new(self.probe_fresh()),
                 server_ms: t0.elapsed().as_millis() as u64,
@@ -526,12 +621,27 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
 
     fn probe_fresh(&self) -> TelemetrySnapshot {
         let settings = read_settings(&self.data_dir);
+        let lang = detect_lang(Some(&settings));
         let guard_opt = load_guard_state_opt(&self.data_dir);
         let guard_for_disp = guard_opt.clone().unwrap_or_else(|| load_guard_state(&self.data_dir));
         let host_info = self.probe.static_host();
         let hw = self.probe.probe_hardware();
         let display = read_display_info(&self.display, &hw.lid_state, &guard_for_disp);
         let display_guard = guard_opt.as_ref().map(DisplayGuardSummary::from);
+
+        let runner_active = self.bg_guard_active.load(Ordering::SeqCst) || plist_exists();
+        let guard_status = if !settings.guard_enabled {
+            "paused"
+        } else if runner_active && hw.lid_state == "closed" {
+            "protecting"
+        } else if runner_active && guard_for_disp.thermal_capped {
+            "thermal_cap"
+        } else if runner_active {
+            "armed"
+        } else {
+            "idle"
+        }
+        .to_string();
 
         let policy = compute_policy(
             &hw.lid_state,
@@ -545,6 +655,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
 
         let mut snap = TelemetrySnapshot {
             timestamp: format_iso8601_utc(now_epoch_ms()),
+            locale: lang.code().to_string(),
             host: HostTelemetry {
                 hostname: host_info.hostname,
                 chip: host_info.chip,
@@ -559,6 +670,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             battery_pct: hw.battery_pct,
             battery_detail: hw.battery_detail,
             thermal_state: hw.thermal_state,
+            thermal_pressure: hw.thermal_pressure,
             cpu_speed_limit_pct: hw.cpu_speed_limit_pct,
             low_power_mode: hw.low_power_mode,
             cpu_topology: host_info.cpu_topology,
@@ -567,6 +679,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             env_vars,
             display,
             display_guard,
+            guard_status,
             degraded: hw.degraded,
             paths: TelemetryPaths {
                 settings_path: abbreviate_home(&settings_path(&self.data_dir)),
@@ -584,13 +697,12 @@ mod tests {
     use super::*;
     use crate::platform::macos::{HardwareProbe, StaticHostInfo};
     use std::sync::atomic::AtomicUsize;
-    use std::time::Duration;
 
     struct FakeProbe {
         delay_ms: u64,
         calls: Arc<AtomicUsize>,
         uptime: Arc<AtomicU64>,
-        lid_closed: Arc<std::sync::atomic::AtomicBool>,
+        lid_closed: Arc<AtomicBool>,
     }
 
     impl ProbeBackend for FakeProbe {
@@ -622,7 +734,8 @@ mod tests {
                 battery_pct: Some(85),
                 battery_detail: "-InternalBattery-0\t85%; discharging".into(),
                 thermal_state: "ok".into(),
-                cpu_speed_limit_pct: 100,
+                thermal_pressure: "nominal".into(),
+                cpu_speed_limit_pct: None,
                 low_power_mode: "0".into(),
                 memory: MemorySummary {
                     total_gb: 16.0,
@@ -661,13 +774,13 @@ mod tests {
     }
 
     #[test]
-    fn etag_dedup_single_flight_and_generation_fencing() {
+    fn etag_dedup_single_flight_generation_fencing_and_bg_guard() {
         let dir =
             std::env::temp_dir().join(format!("mac-clamshell-tel-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let calls = Arc::new(AtomicUsize::new(0));
         let uptime = Arc::new(AtomicU64::new(3600));
-        let lid_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lid_closed = Arc::new(AtomicBool::new(false));
         let bright = Arc::new(Mutex::new(0.70f32));
 
         let engine = Arc::new(TelemetryEngine::with_ttl(
@@ -684,6 +797,7 @@ mod tests {
             },
             2500,
         ));
+        engine.set_bg_guard_active(true);
 
         // 1. 8 concurrent force=true calls coalesce into EXACTLY 1 probe!
         let mut handles = Vec::new();
@@ -693,6 +807,7 @@ mod tests {
         }
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(results[0].snapshot.guard_status, "armed");
         let h0 = results[0].snapshot.hash.clone();
         assert_eq!(h0.len(), 16);
 
@@ -709,22 +824,29 @@ mod tests {
         assert_eq!(upd.snapshot.display.percent, Some(45));
         assert_ne!(upd.snapshot.hash, h0);
 
-        // 4. Generation fencing during in-flight collect
+        // 4. Background guard tick zeroes closed panel and updates guardStatus -> protecting
+        lid_closed.store(true, Ordering::Relaxed);
+        engine.run_background_guard_tick();
+        assert_eq!(*bright.lock().unwrap(), 0.0);
+        let closed_snap = engine.collect(false).snapshot;
+        assert_eq!(closed_snap.guard_status, "protecting");
+
+        // 5. Generation fencing during in-flight collect + guard pause
         let e1 = Arc::clone(&engine);
         let t_old = std::thread::spawn(move || e1.collect(true));
         std::thread::sleep(Duration::from_millis(10));
         let cfg_res = engine
             .configure(&SettingsPatch {
                 mode_override: Some("strict".into()),
-                max_jobs_override: None,
-                ac_closed_profile: None,
+                guard_enabled: Some(false),
+                ..SettingsPatch::default()
             })
             .unwrap();
         let old_res = t_old.join().unwrap();
-        assert_eq!(old_res.snapshot.policy.profile, "normal");
+        assert_eq!(old_res.snapshot.policy.profile, "eco");
         assert_eq!(cfg_res.snapshot.policy.profile, "strict");
+        assert_eq!(cfg_res.snapshot.guard_status, "paused");
 
-        // Subsequent cached collect MUST see strict, never stale normal!
         let cached = engine.collect(false);
         assert!(cached.from_cache);
         assert_eq!(cached.snapshot.policy.profile, "strict");
@@ -739,7 +861,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let calls = Arc::new(AtomicUsize::new(0));
         let uptime = Arc::new(AtomicU64::new(3600));
-        let lid_closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lid_closed = Arc::new(AtomicBool::new(false));
         let bright = Arc::new(Mutex::new(0.70f32));
 
         let engine = Arc::new(TelemetryEngine::with_ttl(
@@ -757,22 +879,17 @@ mod tests {
             5,
         ));
 
-        // 1. Pre-warm at startup
         engine.prewarm();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        // 2. Fresh hit returns immediately with stale=false
         let fresh = engine.collect_swr();
         assert!(fresh.from_cache);
         assert!(!fresh.stale);
         assert_eq!(fresh.snapshot.lid_state, "open");
 
-        // 3. Let cache expire (simulating hours idle) & flip hardware lid to closed
         std::thread::sleep(Duration::from_millis(12));
         lid_closed.store(true, Ordering::Relaxed);
 
-        // 4. Two back-to-back SWR calls (resources/read + clamshell_panel) MUST return in <5ms
-        //    without blocking on the 45ms probe, and trigger ONLY ONE background probe!
         let t0 = Instant::now();
         let swr1 = engine.collect_swr();
         let swr2 = engine.collect_swr();
@@ -783,7 +900,6 @@ mod tests {
         assert_eq!(swr1.snapshot.lid_state, "open");
         assert_eq!(swr2.snapshot.lid_state, "open");
 
-        // 5. Follow-up collect(false) coalesces onto the single background probe and gets fresh closed state
         let after = engine.collect(false);
         assert_eq!(after.snapshot.lid_state, "closed");
         assert!(!after.stale);

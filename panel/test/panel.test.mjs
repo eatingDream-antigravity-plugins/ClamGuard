@@ -19,6 +19,7 @@ import {
   createBrightnessController,
 } from "../brightness.js";
 import { applyHostStyleVariables, parseColorLum } from "../bridge.js";
+import { computeOptimisticState, describeGuardStatus, resolvePanelLang } from "../model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_DIR = path.resolve(__dirname, "..");
@@ -226,8 +227,40 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.ok(!patchAllBody.includes("root.innerHTML"), "patchAll must strictly patch in-place without rebuilding root.innerHTML");
     assert.ok(html.includes("diag-tray") && html.includes("bright-track") && html.includes("mode-rail"), "missing progressive disclosure tray and direct manipulation controls");
     assert.ok(html.includes("clamshell_refresh") && html.includes("clamshell_configure") && html.includes("clamshell_set_brightness"), "missing expected MCP tool names");
+    for (const forbidden of ["Normal 正常", "max_jobs=", "拖动或点按轨道", "自动跟随"]) {
+      assert.ok(!html.includes(forbidden), `panel.html must not contain cluttered text: ${forbidden}`);
+    }
     const m = html.match(/<script>\/\*__MAC_CLAMSHELL_BOOT__\*\/<\/script><script>([\s\S]+)<\/script>/);
     assert.ok(m, "missing inline script");
     new Function(m[1]);
+  });
+
+  it("resolves bilingual panel language, guard status descriptions, and optimistic state", () => {
+    assert.equal(resolvePanelLang({ saved: "zh-CN", hostLocale: "en-US" }), "zh-CN");
+    assert.equal(resolvePanelLang({ saved: null, hostLocale: "zh-Hans-CN", navLang: "en" }), "zh-CN");
+    assert.equal(resolvePanelLang({ saved: null, hostLocale: "fr-FR", navLang: "en-US" }), "en");
+
+    assert.equal(
+      describeGuardStatus({ settings: { guardEnabled: false } }, 80, "en"),
+      "Guard paused"
+    );
+    assert.equal(
+      describeGuardStatus({ guardStatus: "protecting", settings: { guardEnabled: true } }, 65, "zh-CN"),
+      "熄屏保护中 · 恢复 65%"
+    );
+
+    const base = {
+      lidState: "open",
+      cpuTopology: { total: 10 },
+      policy: { profile: "normal", autoProfile: "normal", maxJobs: 10 },
+      guardStatus: "armed",
+      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true },
+      envVars: { CARGO_BUILD_JOBS: "4" },
+    };
+    const paused = computeOptimisticState(base, { guardEnabled: false, modeOverride: "eco", maxJobsOverride: 3 });
+    assert.equal(paused.guardStatus, "paused");
+    assert.equal(paused.policy.profile, "eco");
+    assert.equal(paused.policy.modeSource, "manual");
+    assert.equal(paused.policy.maxJobs, 3);
   });
 });

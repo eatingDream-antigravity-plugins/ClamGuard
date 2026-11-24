@@ -15,13 +15,14 @@ const templatePath = path.join(__dirname, "template.html");
 const distDir = path.join(__dirname, "dist");
 const outHtml = path.join(distDir, "panel.html");
 const BOOT_TOKEN = "/*__MAC_CLAMSHELL_BOOT__*/";
+const MODULES = ["bridge.js", "polling.js", "brightness.js", "model.js"];
 
 function compactHtmlTemplates(src) {
   return src
-    .replace(/>\n[ \t]*</g, "><")
-    .replace(/>\n[ \t]*\$\{/g, ">${")
-    .replace(/\}\n[ \t]*</g, "}<")
-    .replace(/\}\n[ \t]*\$\{/g, "}${");
+    .replace(/\n[ \t]*</g, "<")
+    .replace(/>\n[ \t]*/g, ">")
+    .replace(/\n[ \t]*\$\{/g, "${")
+    .replace(/\}\n[ \t]*/g, "}");
 }
 
 function tryLoadEsbuild() {
@@ -35,7 +36,7 @@ function tryBunBundle() {
   let tmpDir = "";
   try {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mc-pack-"));
-    for (const f of ["bridge.js", "polling.js", "brightness.js"]) {
+    for (const f of MODULES) {
       fs.writeFileSync(path.join(tmpDir, f), fs.readFileSync(path.join(__dirname, f), "utf8"), "utf8");
     }
     const tmpEntry = path.join(tmpDir, "app.js");
@@ -77,7 +78,7 @@ function fallbackMinifyCss(css) {
 }
 
 function fallbackBundleJs() {
-  const parts = ["bridge.js", "polling.js", "brightness.js"].map((f) =>
+  const parts = MODULES.map((f) =>
     fs.readFileSync(path.join(__dirname, f), "utf8").replace(/^\s*export\s+/gm, "")
   );
   const appSrc = compactHtmlTemplates(
