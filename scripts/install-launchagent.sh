@@ -58,12 +58,14 @@ if [ "$INTERVAL" -lt 2 ]; then
 fi
 
 if [ -z "$BIN_PATH" ]; then
-  if [ -x "${HOME}/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp" ]; then
+  SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  if [ -x "${SCRIPT_DIR}/../bin/mac-clamshell-mcp" ]; then
+    BIN_PATH="$(CDPATH= cd -- "${SCRIPT_DIR}/../bin" && pwd)/mac-clamshell-mcp"
+  elif [ -x "${HOME}/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp" ]; then
     BIN_PATH="${HOME}/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp"
   elif command -v mac-clamshell-mcp >/dev/null 2>&1; then
     BIN_PATH="$(command -v mac-clamshell-mcp)"
   else
-    SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
     BIN_PATH="${SCRIPT_DIR}/../target/release/mac-clamshell-mcp"
   fi
 fi

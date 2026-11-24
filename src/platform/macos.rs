@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CMD_TIMEOUT_MS: u64 = 2500;
@@ -34,7 +34,8 @@ pub struct HardwareProbe {
     pub battery_pct: Option<u32>,
     pub battery_detail: String,
     pub thermal_state: String,
-    pub cpu_speed_limit_pct: u32,
+    pub thermal_pressure: String,
+    pub cpu_speed_limit_pct: Option<u32>,
     pub low_power_mode: String,
     pub memory: MemorySummary,
     pub load_avg: [f64; 3],
@@ -46,6 +47,9 @@ pub trait ProbeBackend: Send + Sync {
     fn static_host(&self) -> StaticHostInfo;
     fn probe_hardware(&self) -> HardwareProbe;
     fn lid_closed_fast(&self) -> Option<bool>;
+    fn thermal_pressure_fast(&self) -> String {
+        "nominal".to_string()
+    }
 }
 
 pub fn parse_bool_token(val: &str) -> Option<bool> {
@@ -53,6 +57,39 @@ pub fn parse_bool_token(val: &str) -> Option<bool> {
         "yes" | "true" | "1" => Some(true),
         "no" | "false" | "0" => Some(false),
         _ => None,
+    }
+}
+
+pub fn map_darwin_thermal_level(raw: u64) -> &'static str {
+    match raw {
+        0 => "nominal",
+        1 => "fair",
+        2 => "serious",
+        _ => "critical",
+    }
+}
+
+/// Build accurate CPU topology: when `perflevel0 == 0` (Intel / homogeneous Mac),
+/// report homogeneous cores (`performance_cores = 0`, `efficiency_cores = 0`).
+pub fn build_cpu_topology(total: u32, perflevel0: u32, perflevel1: u32) -> CpuTopology {
+    let total = total.max(1);
+    if perflevel0 == 0 {
+        CpuTopology {
+            total,
+            performance_cores: 0,
+            efficiency_cores: 0,
+        }
+    } else {
+        let e_cores = if perflevel1 > 0 {
+            perflevel1
+        } else {
+            total.saturating_sub(perflevel0).max(1)
+        };
+        CpuTopology {
+            total: total.max(perflevel0 + e_cores),
+            performance_cores: perflevel0,
+            efficiency_cores: e_cores,
+        }
     }
 }
 
@@ -168,9 +205,11 @@ pub fn parse_pmset_batt(out: &str) -> (String, Option<u32>, String) {
     (power_source, pct, detail)
 }
 
-pub fn parse_pmset_therm(out: &str) -> (String, u32) {
+/// Parse `pmset -g therm`. Returns `(thermal_state, cpu_speed_limit_pct)` where `cpu_speed_limit_pct`
+/// is `Some(pct)` ONLY when Intel XCPM `CPU_Speed_Limit` was actually reported by macOS.
+pub fn parse_pmset_therm(out: &str) -> (String, Option<u32>) {
     let mut thermal_state = "ok";
-    let mut speed_limit = 100u32;
+    let mut speed_limit = None;
     let mut has_level = false;
     let mut no_warning = false;
 
@@ -188,7 +227,7 @@ pub fn parse_pmset_therm(out: &str) -> (String, u32) {
             if let Some((_, rhs)) = line.split_once('=') {
                 let digits: String = rhs.chars().filter(|c| c.is_ascii_digit()).collect();
                 if let Ok(v) = digits.parse::<u32>() {
-                    speed_limit = v;
+                    speed_limit = Some(v);
                     if v < 90 {
                         thermal_state = "warn";
                     }
@@ -211,6 +250,40 @@ pub fn parse_pmset_therm(out: &str) -> (String, u32) {
         thermal_state = "warn";
     }
     (thermal_state.to_string(), speed_limit)
+}
+
+pub fn resolve_thermal_status(
+    mock_therm: Option<&str>,
+    mock_pressure: Option<&str>,
+    darwin_pressure: Option<&str>,
+    pmset_out: &str,
+) -> (String, String, Option<u32>) {
+    if let Some(raw) = mock_pressure.or(mock_therm) {
+        let trimmed = raw.trim().to_ascii_lowercase();
+        if let Some(rest) = trimmed.strip_prefix("intel_warn:") {
+            let spd = rest.parse::<u32>().ok().unwrap_or(72);
+            return ("warn".to_string(), "serious".to_string(), Some(spd));
+        }
+        return match trimmed.as_str() {
+            "nominal" | "ok" | "0" => ("ok".to_string(), "nominal".to_string(), None),
+            "fair" | "moderate" | "1" => ("ok".to_string(), "fair".to_string(), None),
+            "serious" | "heavy" | "warn" | "2" => ("warn".to_string(), "serious".to_string(), None),
+            "critical" | "trapping" | "3" => ("warn".to_string(), "critical".to_string(), None),
+            other => ("ok".to_string(), other.to_string(), None),
+        };
+    }
+
+    let (pm_state, speed_limit) = parse_pmset_therm(pmset_out);
+    let pressure = darwin_pressure
+        .unwrap_or(if pm_state == "warn" { "serious" } else { "nominal" })
+        .to_string();
+    let state = if pm_state == "warn" || matches!(pressure.as_str(), "serious" | "critical") {
+        "warn"
+    } else {
+        "ok"
+    }
+    .to_string();
+    (state, pressure, speed_limit)
 }
 
 pub fn parse_low_power_mode(out: &str) -> String {
@@ -400,6 +473,43 @@ mod native {
             host_info_out: *mut i32,
             host_info_out_cnt: *mut u32,
         ) -> i32;
+
+        fn notify_register_check(name: *const libc::c_char, out_token: *mut libc::c_int) -> u32;
+        fn notify_get_state(token: libc::c_int, state64: *mut u64) -> u32;
+        fn notify_cancel(token: libc::c_int) -> u32;
+    }
+
+    pub fn thermal_pressure_level() -> Option<&'static str> {
+        const KEY: &[u8] = b"com.apple.system.thermalpressurelevel\0";
+        static TOKEN: Mutex<Option<libc::c_int>> = Mutex::new(None);
+
+        let mut guard = TOKEN.lock().unwrap_or_else(|e| e.into_inner());
+        for _attempt in 0..2 {
+            let tok = match *guard {
+                Some(t) => t,
+                None => {
+                    let mut out_tok: libc::c_int = -1;
+                    let rc = unsafe {
+                        notify_register_check(KEY.as_ptr() as *const libc::c_char, &mut out_tok)
+                    };
+                    if rc != 0 || out_tok < 0 {
+                        return None;
+                    }
+                    *guard = Some(out_tok);
+                    out_tok
+                }
+            };
+            let mut state64: u64 = 0;
+            let rc = unsafe { notify_get_state(tok, &mut state64) };
+            if rc == 0 {
+                return Some(map_darwin_thermal_level(state64));
+            }
+            unsafe {
+                let _ = notify_cancel(tok);
+            }
+            *guard = None;
+        }
+        None
     }
 
     fn cached_host_port() -> u32 {
@@ -461,27 +571,25 @@ impl MacOsProbeBackend {
     fn compute_static_host() -> StaticHostInfo {
         #[cfg(target_os = "macos")]
         {
-            let total = native::sysctl_u64("hw.ncpu").unwrap_or(4).max(1) as u32;
+            let total = native::sysctl_u64("hw.ncpu")
+                .or_else(|| native::sysctl_u64("hw.logicalcpu"))
+                .unwrap_or(4)
+                .max(1) as u32;
             let p_cores = native::sysctl_u64("hw.perflevel0.logicalcpu").unwrap_or(0) as u32;
             let raw_e = native::sysctl_u64("hw.perflevel1.logicalcpu").unwrap_or(0) as u32;
-            let e_cores = if raw_e > 0 {
-                raw_e
-            } else if total >= 4 {
-                2
+            let cpu_topology = build_cpu_topology(total, p_cores, raw_e);
+            let default_chip = if cfg!(target_arch = "x86_64") {
+                "Intel Mac"
             } else {
-                1
+                "Apple Silicon"
             };
             StaticHostInfo {
                 hostname: native::hostname(),
                 chip: native::sysctl_string("machdep.cpu.brand_string")
-                    .unwrap_or_else(|| "Apple Silicon".to_string()),
+                    .unwrap_or_else(|| default_chip.to_string()),
                 macos_version: native::sysctl_string("kern.osproductversion")
                     .unwrap_or_else(|| "macOS".to_string()),
-                cpu_topology: CpuTopology {
-                    total,
-                    performance_cores: p_cores,
-                    efficiency_cores: e_cores,
-                },
+                cpu_topology,
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -493,7 +601,7 @@ impl MacOsProbeBackend {
                 cpu_topology: CpuTopology {
                     total: 4,
                     performance_cores: 0,
-                    efficiency_cores: 2,
+                    efficiency_cores: 0,
                 },
             }
         }
@@ -503,7 +611,23 @@ impl MacOsProbeBackend {
 impl ProbeBackend for MacOsProbeBackend {
     fn static_host(&self) -> StaticHostInfo {
         static HOST: OnceLock<StaticHostInfo> = OnceLock::new();
-        HOST.get_or_init(Self::compute_static_host).clone()
+        let mut base = HOST.get_or_init(Self::compute_static_host).clone();
+        if let Ok(mock_topo) = std::env::var("MAC_CLAMSHELL_MOCK_TOPOLOGY") {
+            let trimmed = mock_topo.trim();
+            if let Some(rest) = trimmed.strip_prefix("intel:") {
+                if let Ok(cores) = rest.parse::<u32>() {
+                    base.chip = "Intel Core i9".to_string();
+                    base.cpu_topology = build_cpu_topology(cores, 0, 0);
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("as:") {
+                let parts: Vec<u32> = rest.split(':').filter_map(|p| p.parse().ok()).collect();
+                if parts.len() == 2 {
+                    base.chip = "Apple Silicon".to_string();
+                    base.cpu_topology = build_cpu_topology(parts[0] + parts[1], parts[0], parts[1]);
+                }
+            }
+        }
+        base
     }
 
     fn lid_closed_fast(&self) -> Option<bool> {
@@ -537,11 +661,46 @@ impl ProbeBackend for MacOsProbeBackend {
         }
     }
 
+    fn thermal_pressure_fast(&self) -> String {
+        let mock_pressure = std::env::var("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mock_therm = std::env::var("MAC_CLAMSHELL_MOCK_THERM")
+            .ok()
+            .filter(|s| !s.is_empty());
+        if mock_pressure.is_some() || mock_therm.is_some() {
+            let (_, pressure, _) =
+                resolve_thermal_status(mock_therm.as_deref(), mock_pressure.as_deref(), None, "");
+            return pressure;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            native::thermal_pressure_level()
+                .unwrap_or("nominal")
+                .to_string()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            "nominal".to_string()
+        }
+    }
+
     fn probe_hardware(&self) -> HardwareProbe {
-        let mock_lid = std::env::var("MAC_CLAMSHELL_MOCK_LID").ok().filter(|s| !s.is_empty());
-        let mock_power = std::env::var("MAC_CLAMSHELL_MOCK_POWER").ok().filter(|s| !s.is_empty());
-        let mock_batt = std::env::var("MAC_CLAMSHELL_MOCK_BATT").ok().filter(|s| !s.is_empty());
-        let mock_therm = std::env::var("MAC_CLAMSHELL_MOCK_THERM").ok().filter(|s| !s.is_empty());
+        let mock_lid = std::env::var("MAC_CLAMSHELL_MOCK_LID")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mock_power = std::env::var("MAC_CLAMSHELL_MOCK_POWER")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mock_batt = std::env::var("MAC_CLAMSHELL_MOCK_BATT")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mock_therm = std::env::var("MAC_CLAMSHELL_MOCK_THERM")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let mock_pressure = std::env::var("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE")
+            .ok()
+            .filter(|s| !s.is_empty());
 
         let (ioreg_res, batt_res, therm_res, pmset_res) = std::thread::scope(|s| {
             let h_ioreg = s.spawn(|| {
@@ -563,7 +722,7 @@ impl ProbeBackend for MacOsProbeBackend {
                 }
             });
             let h_therm = s.spawn(|| {
-                if mock_therm.is_some() || !cfg!(target_os = "macos") {
+                if mock_therm.is_some() || mock_pressure.is_some() || !cfg!(target_os = "macos") {
                     (true, String::new())
                 } else {
                     run_cmd_timeout("/usr/bin/pmset", &["-g", "therm"], CMD_TIMEOUT_MS)
@@ -604,12 +763,21 @@ impl ProbeBackend for MacOsProbeBackend {
             parse_pmset_batt(&batt_res.1)
         };
 
-        let (thermal_state, cpu_speed_limit_pct) = if let Some(m) = mock_therm {
-            let spd = if m == "warn" { 75 } else { 100 };
-            (m, spd)
+        #[cfg(target_os = "macos")]
+        let darwin_pressure = if mock_therm.is_none() && mock_pressure.is_none() {
+            native::thermal_pressure_level()
         } else {
-            parse_pmset_therm(&therm_res.1)
+            None
         };
+        #[cfg(not(target_os = "macos"))]
+        let darwin_pressure: Option<&'static str> = None;
+
+        let (thermal_state, thermal_pressure, cpu_speed_limit_pct) = resolve_thermal_status(
+            mock_therm.as_deref(),
+            mock_pressure.as_deref(),
+            darwin_pressure,
+            &therm_res.1,
+        );
 
         let low_power_mode = parse_low_power_mode(&pmset_res.1);
 
@@ -638,6 +806,7 @@ impl ProbeBackend for MacOsProbeBackend {
             battery_pct,
             battery_detail,
             thermal_state,
+            thermal_pressure,
             cpu_speed_limit_pct,
             low_power_mode,
             memory,
@@ -653,7 +822,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parsers_handle_real_macos_outputs() {
+    fn parsers_thermal_ffi_and_topology_handle_apple_silicon_and_intel() {
         let ioreg = r#"
       "AppleClamshellCausesSleep" = No
       "AppleClamshellState" = Yes
@@ -669,11 +838,48 @@ mod tests {
         assert_eq!(pct, Some(93));
         assert!(detail.starts_with("-InternalBattery-0"));
 
-        let therm_ok = "Note: No thermal warning level has been recorded\n";
-        assert_eq!(parse_pmset_therm(therm_ok), ("ok".to_string(), 100));
+        // Apple Silicon pmset -g therm omits CPU_Speed_Limit -> None (never fake 100%)
+        let as_therm = "Note: No thermal warning level has been recorded\nNote: No CPU power status has been recorded\n";
+        assert_eq!(parse_pmset_therm(as_therm), ("ok".to_string(), None));
 
-        let therm_warn = "CPU_Speed_Limit = 72\nCPU_Scheduler_Limit = 100\n";
-        assert_eq!(parse_pmset_therm(therm_warn), ("warn".to_string(), 72));
+        // Intel XCPM pmset -g therm reports CPU_Speed_Limit
+        let intel_therm = "CPU_Speed_Limit = 72\nCPU_Scheduler_Limit = 100\n";
+        assert_eq!(parse_pmset_therm(intel_therm), ("warn".to_string(), Some(72)));
+
+        // Darwin thermalpressurelevel mapping + combined resolution
+        assert_eq!(map_darwin_thermal_level(0), "nominal");
+        assert_eq!(map_darwin_thermal_level(1), "fair");
+        assert_eq!(map_darwin_thermal_level(2), "serious");
+        assert_eq!(map_darwin_thermal_level(3), "critical");
+
+        assert_eq!(
+            resolve_thermal_status(None, None, Some("serious"), as_therm),
+            ("warn".to_string(), "serious".to_string(), None)
+        );
+        assert_eq!(
+            resolve_thermal_status(None, None, Some("fair"), as_therm),
+            ("ok".to_string(), "fair".to_string(), None)
+        );
+
+        // Intel homogeneous vs Apple Silicon heterogeneous topology
+        let intel = build_cpu_topology(16, 0, 0);
+        assert_eq!(intel.total, 16);
+        assert_eq!(intel.performance_cores, 0);
+        assert_eq!(intel.efficiency_cores, 0);
+
+        let m3 = build_cpu_topology(14, 10, 4);
+        assert_eq!(m3.total, 14);
+        assert_eq!(m3.performance_cores, 10);
+        assert_eq!(m3.efficiency_cores, 4);
+
+        #[cfg(target_os = "macos")]
+        {
+            let lvl = native::thermal_pressure_level();
+            assert!(
+                matches!(lvl, Some("nominal" | "fair" | "serious" | "critical")),
+                "expected Darwin com.apple.system.thermalpressurelevel, got {lvl:?}"
+            );
+        }
 
         let pm = " displaysleep 0\n lowpowermode 1\n";
         assert_eq!(parse_low_power_mode(pm), "1");

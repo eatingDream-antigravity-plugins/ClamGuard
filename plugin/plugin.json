@@ -8,8 +8,8 @@
   "repository": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
-    "检查当前合盖状态、电源、温度与内建屏幕亮度，并展示 Mac Clamshell 生效策略",
-    "以合盖节能模式运行当前项目的构建或测试任务",
-    "调整 Mac Clamshell 的性能档位、并发上限或内建屏幕亮度"
+    "Check my Mac's lid state, battery, thermal pressure, and active clamshell mode",
+    "Run the current build or test suite using clamshell power-saving throttling",
+    "Dim the built-in display brightness to 30% or open the Mac Clamshell panel"
   ]
 }

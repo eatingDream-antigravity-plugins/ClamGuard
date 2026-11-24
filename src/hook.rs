@@ -1,6 +1,8 @@
+use crate::i18n::{detect_lang, Lang};
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::policy::{
-    compute_policy, format_lid_zh, format_power_zh, format_profile_zh, state_signature,
+    compute_policy, format_lid, format_power, format_profile, format_thermal,
+    format_topology_compact, state_signature,
 };
 use crate::state::{atomic_write, ensure_private_dir, read_settings, settings_path, sha256_hex_16};
 use serde_json::{json, Value};
@@ -184,6 +186,7 @@ pub fn evaluate_hook<P: ProbeBackend>(
     let host = probe.static_host();
     let hw = probe.probe_hardware();
     let settings = read_settings(data_dir);
+    let lang = detect_lang(Some(&settings));
     let policy = compute_policy(
         &hw.lid_state,
         &hw.power_source,
@@ -199,52 +202,60 @@ pub fn evaluate_hook<P: ProbeBackend>(
     if sig == prev_sig {
         return json!({});
     }
-    if prev_sig.is_empty() && policy.profile == "normal" {
+    let prev_was_normal = prev_sig.split('|').nth(3) == Some("normal");
+    if (prev_sig.is_empty() || prev_was_normal) && policy.profile == "normal" {
         return json!({});
     }
 
-    let lid_zh = format_lid_zh(&hw.lid_state);
-    let power_zh = format_power_zh(&hw.power_source, hw.battery_pct);
-    let profile_zh = format_profile_zh(&policy);
-    let src_zh = if policy.mode_source == "manual" {
-        "手动锁定"
-    } else {
-        "自动识别"
-    };
+    let lid_loc = format_lid(&hw.lid_state, lang);
+    let power_loc = format_power(&hw.power_source, hw.battery_pct, lang);
+    let profile_loc = format_profile(&policy, &host.cpu_topology, lang);
+    let therm_loc = format_thermal(
+        &hw.thermal_state,
+        &hw.thermal_pressure,
+        hw.cpu_speed_limit_pct,
+        lang,
+    );
     let batt_suffix = hw
         .battery_pct
         .map(|p| format!(" ({p}%)"))
         .unwrap_or_default();
+    let sys_therm = match hw.cpu_speed_limit_pct {
+        Some(pct) => format!("{} (pressure={}, CPU_Speed_Limit={pct}%)", hw.thermal_state, hw.thermal_pressure),
+        None => format!("{} (pressure={})", hw.thermal_state, hw.thermal_pressure),
+    };
+    let topo_compact = format_topology_compact(&host.cpu_topology);
 
     let (sys_msg, user_md) = if policy.profile == "normal" {
         let msg = format!(
             "[mac-clamshell] Live status update: lid={}, power={}{}, thermal={}, source={}. Throttling is now LIFTED (profile=normal, max_jobs={}). Normal execution speed and concurrency may resume.",
-            hw.lid_state, hw.power_source, batt_suffix, hw.thermal_state, policy.mode_source, policy.max_jobs
+            hw.lid_state, hw.power_source, batt_suffix, sys_therm, policy.mode_source, policy.max_jobs
         );
-        let md = if policy.mode_source == "manual" {
-            format!(
-                "> **Mac Clamshell**: 已**手动切换**至正常性能模式（当前{lid_zh}，{power_zh}，并发≤{}）。",
+        let md = match (lang, policy.mode_source.as_str()) {
+            (Lang::ZhCn, "manual") => format!(
+                "> **Mac Clamshell**: 已**手动切换**至正常性能模式（当前{lid_loc}，{power_loc}，最高 {} 并发）。",
                 policy.max_jobs
-            )
-        } else {
-            format!("> **Mac Clamshell**: 检测到已**{lid_zh}**（{power_zh}，温度正常）— 已自动恢复正常性能释放。")
+            ),
+            (Lang::ZhCn, _) => format!(
+                "> **Mac Clamshell**: 检测到已**{lid_loc}**（{power_loc}，温控 {therm_loc}）— 已自动恢复正常性能。"
+            ),
+            (Lang::En, "manual") => format!(
+                "> **Mac Clamshell**: Manually switched to **Normal** performance mode (lid {lid_loc}, {power_loc}, up to {} jobs).",
+                policy.max_jobs
+            ),
+            (Lang::En, _) => format!(
+                "> **Mac Clamshell**: **Lid {lid_loc}** ({power_loc}, thermal {therm_loc}) — full performance restored."
+            ),
         };
         (msg, md)
     } else {
-        let therm_zh = if hw.thermal_state == "warn" {
-            format!("触发温控告警 (CPU_Speed_Limit={}%)", hw.cpu_speed_limit_pct)
-        } else {
-            "温度正常".to_string()
-        };
         let msg = format!(
-            "[mac-clamshell] Live hardware status: lid={}, power={}{}, thermal={} (CPU_Speed_Limit={}%), topology={}P+{}E, source={}. Active profile={} (max_jobs={}, taskpolicy='{}', nice={}). Load the `mac-clamshell` skill and follow its rules: wrap CPU/I/O-heavy commands with `{runner_bin} run --sh \"<cmd>\"` (or `{runner_bin} run -- <cmd> ...`), cap parallelism/threads to {}, and avoid parallel heavy subagents.",
+            "[mac-clamshell] Live hardware status: lid={}, power={}{}, thermal={}, topology={}, source={}. Active profile={} (max_jobs={}, taskpolicy='{}', nice={}). Load the `mac-clamshell` skill and follow its rules: wrap CPU/I/O-heavy commands with `{runner_bin} run --sh \"<cmd>\"` (or `{runner_bin} run -- <cmd> ...`), cap parallelism/threads to {}, and avoid parallel heavy subagents.",
             hw.lid_state,
             hw.power_source,
             batt_suffix,
-            hw.thermal_state,
-            hw.cpu_speed_limit_pct,
-            host.cpu_topology.performance_cores,
-            host.cpu_topology.efficiency_cores,
+            sys_therm,
+            topo_compact,
             policy.mode_source,
             policy.profile,
             policy.max_jobs,
@@ -252,9 +263,28 @@ pub fn evaluate_hook<P: ProbeBackend>(
             policy.nice_level,
             policy.max_jobs
         );
-        let md = format!(
-            "> **Mac Clamshell**（{src_zh}）: 当前**{lid_zh}运行**（{power_zh}，{therm_zh}）— 已启用 **{profile_zh}**。"
-        );
+        let md = match lang {
+            Lang::ZhCn => {
+                let src_zh = if policy.mode_source == "manual" {
+                    "手动锁定"
+                } else {
+                    "自动识别"
+                };
+                format!(
+                    "> **Mac Clamshell**（{src_zh}）: 当前**{lid_loc}运行**（{power_loc}，温控 {therm_loc}）— 已启用 **{profile_loc}**。"
+                )
+            }
+            Lang::En => {
+                let src_en = if policy.mode_source == "manual" {
+                    "manual"
+                } else {
+                    "auto"
+                };
+                format!(
+                    "> **Mac Clamshell** ({src_en}): **Lid {lid_loc}** ({power_loc}, thermal {therm_loc}) — **{profile_loc}** active."
+                )
+            }
+        };
         (msg, md)
     };
 
@@ -347,7 +377,8 @@ mod tests {
                 battery_pct: Some(80),
                 battery_detail: String::new(),
                 thermal_state: "ok".into(),
-                cpu_speed_limit_pct: 100,
+                thermal_pressure: "nominal".into(),
+                cpu_speed_limit_pct: None,
                 low_power_mode: "0".into(),
                 memory: MemorySummary {
                     total_gb: 16.0,
@@ -378,10 +409,19 @@ mod tests {
     }
 
     #[test]
-    fn hook_lifecycle_ttl_and_same_second_settings_invalidation() {
+    fn hook_lifecycle_ttl_bilingual_and_no_fake_speed_limit() {
         let dir =
             std::env::temp_dir().join(format!("mac-clamshell-hook-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        write_settings(
+            &dir,
+            &SettingsPatch {
+                lang: Some("en".into()),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+
         let closed = StubProbe {
             lid: "closed".into(),
             power: "battery".into(),
@@ -391,7 +431,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        // 1. Fresh SessionStart under eco emits injectSteps without terminationBehavior
+        // 1. Fresh SessionStart under eco (English) emits injectSteps without fake CPU_Speed_Limit=100%
         let r1 = evaluate_hook(
             Some("session-start"),
             HookInput {
@@ -406,6 +446,15 @@ mod tests {
         );
         assert_eq!(r1["injectSteps"].as_array().unwrap().len(), 1);
         assert!(r1.get("terminationBehavior").is_none());
+        let sys1 = r1["injectSteps"][0]["systemMessage"]["systemMessage"]
+            .as_str()
+            .unwrap();
+        let md1 = r1["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            .as_str()
+            .unwrap();
+        assert!(sys1.contains("pressure=nominal"));
+        assert!(!sys1.contains("CPU_Speed_Limit="));
+        assert!(md1.contains("Lid closed"));
 
         // 2. Immediate PreInvocation within TTL hits cache -> {}
         let r2 = evaluate_hook(
@@ -422,13 +471,14 @@ mod tests {
         );
         assert_eq!(r2, json!({}));
 
-        // 3. Same-second settings update bypasses TTL and emits PreInvocation with terminationBehavior=""
+        // 3. Same-second settings update to zh-CN + strict bypasses TTL and emits Chinese user_markdown
         write_settings(
             &dir,
             &SettingsPatch {
                 mode_override: Some("strict".into()),
                 max_jobs_override: Some(1),
-                ac_closed_profile: None,
+                lang: Some("zh-CN".into()),
+                ..SettingsPatch::default()
             },
         )
         .unwrap();
@@ -449,6 +499,10 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("profile=strict"));
+        assert!(r3["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            .as_str()
+            .unwrap()
+            .contains("强限保护模式"));
 
         // 4. Fresh SessionStart under normal emits {}
         let open = StubProbe {
@@ -460,7 +514,7 @@ mod tests {
             &SettingsPatch {
                 mode_override: Some("auto".into()),
                 max_jobs_override: Some(0),
-                ac_closed_profile: None,
+                ..SettingsPatch::default()
             },
         )
         .unwrap();
