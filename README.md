@@ -7,7 +7,7 @@
 **Keep your MacBook cool, quiet, and its built-in screen truly off when running builds or AI agents with the lid closed.**
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v1.1.0-D97757)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)<!-- x-release-please-version -->
+[![Release](https://img.shields.io/static/v1?label=release&message=v1.1.0&color=D97757)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)<!-- x-release-please-version -->
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 
