@@ -31,7 +31,8 @@ The `mac-clamshell-mcp` plugin ships a native Rust binary (`~/.gemini/config/plu
    - **`eco` (lid closed + Battery power)**: Strict E-core execution (`taskpolicy -c background`, `nice 15`, `max_jobs <= 2`, or `1` when battery `<= 20%`). Execute sequentially, prefer targeted/incremental builds & tests, and avoid parallel heavy fan-outs.
    - **`strict` (thermal warning / throttle detected)**: `taskpolicy -b`, `nice 19`, `max_jobs=1`. Do not start new heavy compute tasks without alerting the user and letting the machine cool down first.
 
-3. **Display Brightness & User Override**
+3. **Display Brightness, Lock Screen & User Override**
    - Use the `clamshell_set_brightness` MCP tool or `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp brightness set <0..100>` to adjust built-in display brightness; while the lid is closed, Mac Clamshell MCP safely updates the wake-restore target without lighting the closed panel.
+   - Use the `clamshell_lock_screen` MCP tool (only when explicitly requested by the user) or `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp lock` to lock the macOS screen immediately without putting the Mac to sleep.
    - Use the `clamshell_panel` MCP tool to open the live dashboard or inspect hardware/policy status.
    - If the user explicitly requests full performance for a specific task, follow their instruction and briefly note that throttling was bypassed for that run.

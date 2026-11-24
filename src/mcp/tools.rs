@@ -216,7 +216,12 @@ pub fn list_tools_json() -> Value {
                 "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal pressure, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "fresh": {
+                            "type": "boolean",
+                            "description": "Bypass short-lived telemetry cache and probe macOS immediately."
+                        }
+                    },
                     "additionalProperties": false
                 },
                 "_meta": {
@@ -244,6 +249,10 @@ pub fn list_tools_json() -> Value {
                         "force": {
                             "type": "boolean",
                             "description": "Bypass short-lived telemetry cache and probe macOS immediately."
+                        },
+                        "fresh": {
+                            "type": "boolean",
+                            "description": "Alias for force: bypass short-lived telemetry cache and probe macOS immediately."
                         }
                     },
                     "additionalProperties": false
@@ -314,6 +323,16 @@ pub fn list_tools_json() -> Value {
                     "required": ["percent"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "clamshell_lock_screen",
+                "title": "Lock Mac Screen",
+                "description": "Lock the macOS screen immediately without putting the Mac to sleep, keeping background builds and AI agents running. Uses native SACLockScreenImmediate with automatic CGSession/pmset fallback and zero Accessibility permissions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -326,7 +345,8 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
 ) -> Value {
     match name {
         "clamshell_panel" => {
-            let collected = engine.collect(false);
+            let fresh = args.get("fresh").and_then(|v| v.as_bool()).unwrap_or(false);
+            let collected = engine.collect(fresh);
             let mut sc = serde_json::to_value(&*collected.snapshot).unwrap_or_else(|_| json!({}));
             if let Some(obj) = sc.as_object_mut() {
                 obj.insert("unchanged".into(), json!(false));
@@ -340,8 +360,12 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             })
         }
         "clamshell_refresh" => {
-            let if_hash = args.get("ifHash").and_then(|v| v.as_str());
-            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+            let if_hash = args
+                .get("ifHash")
+                .or_else(|| args.get("if_hash"))
+                .and_then(|v| v.as_str());
+            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false)
+                || args.get("fresh").and_then(|v| v.as_bool()).unwrap_or(false);
             let (unchanged, sc, snap) = engine.refresh_json(if_hash, force);
             let text = if unchanged {
                 "unchanged".to_string()
@@ -474,6 +498,35 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                 }
             }
         }
+        "clamshell_lock_screen" => match engine.lock_screen() {
+            Ok((method, locked_at_ms, server_ms)) => {
+                let text = match engine.detect_lang() {
+                    Lang::ZhCn => format!("已锁屏（{method}），Mac 将保持唤醒以继续运行后台任务。"),
+                    Lang::En => format!(
+                        "Screen locked ({method}); Mac remains awake for background tasks."
+                    ),
+                };
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": {
+                        "ok": true,
+                        "method": method,
+                        "locked_at_ms": locked_at_ms,
+                        "serverMs": server_ms
+                    }
+                })
+            }
+            Err(err) => {
+                let msg = match engine.detect_lang() {
+                    Lang::ZhCn => format!("锁屏失败: {err}"),
+                    Lang::En => format!("Failed to lock screen: {err}"),
+                };
+                json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": msg }]
+                })
+            }
+        },
         other => json!({
             "isError": true,
             "content": [{ "type": "text", "text": format!("Unknown tool: {other}") }]

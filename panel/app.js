@@ -1,5 +1,5 @@
 import { App, applyHostContext } from "./bridge.js";
-import { createAdaptivePoller } from "./polling.js";
+import { attachRevealRefresh, createAdaptivePoller } from "./polling.js";
 import { clampPercent, createBrightnessController } from "./brightness.js";
 import { computeOptimisticState, describeGuardStatus, resolvePanelLang } from "./model.js";
 
@@ -17,6 +17,7 @@ const MODE_ZH = { auto: "自动", normal: "正常", utility: "控温", eco: "节
 const LANG_KEY = "mac-clamshell-lang";
 
 const STATIC_TXT = [
+  ["t-lock", "Lock", "锁屏"],
   ["t-disp", "Built-in Display", "内建屏幕亮度"],
   ["t-guard", "Closed-lid screen guard", "合盖熄屏守护"],
   ["t-perf", "Performance Mode", "性能档位"],
@@ -32,6 +33,7 @@ const STATIC_TXT = [
 
 const STATIC_ARIA = [
   ["#auto-chip", "Auto-refresh", "自动轮询"],
+  ["#lock-btn", "Lock Screen", "锁屏"],
   ["#refresh-btn", "Refresh", "刷新"],
   ["#lang-btn", "Switch language", "切换语言"],
   ["#jd", "1 fewer job", "减少 1 并发"],
@@ -68,6 +70,7 @@ let curHash = bootData?.hash || "";
 let isLoading = !bootData;
 let isSyncing = false;
 let isBrightSyncing = false;
+let isLocking = false;
 let optimisticBright = null;
 let fbState = null;
 let fbTimer = null;
@@ -204,18 +207,19 @@ function patchChrome() {
   if (!mounted) return false;
   if (curData?.timestamp) tx("ht", fmtTime(curData.timestamp));
   const net = netMetrics || poller.getMetrics();
-  const pausedTxt = bi("Paused", "已暂停");
-  tx("ft", net.pausedHidden ? pausedTxt : "");
+  tx("ft", net.inBackground ? bi("Background", "后台") : "");
 
   const chip = $("auto-chip");
   if (chip) {
-    const sec = Math.round((net.currentIntervalMs || 15000) / 1000);
+    const sec = Math.round((net.currentIntervalMs || 3000) / 1000);
     sa(chip, "data-on", net.enabled);
-    sa(chip, "data-ps", net.enabled && net.pausedHidden);
+    sa(chip, "data-ps", false);
     sa(chip, "aria-pressed", net.enabled);
-    tx(chip.lastElementChild, net.enabled && net.pausedHidden ? pausedTxt : bi(`Auto ${sec}s`, `自动 ${sec}s`));
+    tx(chip.lastElementChild, bi(`Auto ${sec}s`, `自动 ${sec}s`));
   }
 
+  const lb = $("lock-btn");
+  if (lb) lb.disabled = isLocking;
   sa($("refresh-btn"), "data-busy", showBusySpin);
   patchFeedback();
   return true;
@@ -438,7 +442,8 @@ function mountShell() {
   <div class="f ha">
     <span id="fb" class="fb-slot"></span>
     ${btn("ch lg ns p9 b1 g2 sh m2", 'id="lang-btn" data-a="lang"', '<span data-lg="en">EN</span><span>/</span><span data-lg="zh-CN">中文</span>')}
-    ${btn("ch ns p9 b1 g2 sh m2", 'id="auto-chip" data-a="auto" aria-pressed="true"', `<span class="cd p9"></span><span>${bi("Auto 15s", "自动 15s")}</span>`)}
+    ${btn("ch ns p9 b1 g2 sh m2", 'id="auto-chip" data-a="auto" aria-pressed="true"', `<span class="cd p9"></span><span>${bi("Auto 3s", "自动 3s")}</span>`)}
+    ${btn("ch lk ns p9 b1 g2 sh m2", 'id="lock-btn" data-a="lock"', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id="t-lock"></span>')}
     ${btn("ib p9 b1 g2 sh", 'id="refresh-btn" data-a="refresh"', '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>')}
   </div>
 </header>
@@ -541,7 +546,7 @@ const poller = createAdaptivePoller({
     netMetrics = m;
     patchChrome();
   },
-  fetcher: async ({ force }) => {
+  fetcher: async ({ force, reason }) => {
     if (force) {
       isLoading = true;
       clearTimeout(busyTimer);
@@ -552,17 +557,17 @@ const poller = createAdaptivePoller({
         }
       }, 150);
     }
-    const prevHash = curHash;
     try {
       const args = { force: Boolean(force) };
+      if (force) args.fresh = true;
       if (curHash) args.ifHash = curHash;
       const sc = await rpc("clamshell_refresh", args, false);
       applyTelemetry(sc);
-      if (!sc.unchanged && sc.hash && sc.hash !== prevHash) patchAll(curData);
+      if (!sc.unchanged) patchAll(curData);
       else patchChrome();
       return sc;
     } catch (err) {
-      if (force) setFeedback("err", bi("Refresh failed", "刷新失败"), () => refreshNow(true));
+      if (reason === "manual") setFeedback("err", bi("Refresh failed", "刷新失败"), () => refreshNow(true));
       throw err;
     } finally {
       if (force) {
@@ -609,6 +614,21 @@ const brightnessCtrl = createBrightnessController({
 
 const refreshNow = (force = true) =>
   poller.trigger({ force, reason: force ? "manual" : "poll" }).catch(() => {});
+
+async function lockScreenNow() {
+  if (isLocking) return;
+  isLocking = true;
+  patchChrome();
+  try {
+    await rpc("clamshell_lock_screen", {});
+    setFeedback("ok", bi("✓ Locked", "✓ 已锁屏"));
+  } catch (err) {
+    setFeedback("err", err?.message || bi("Lock failed", "锁屏失败"), () => lockScreenNow());
+  } finally {
+    isLocking = false;
+    patchChrome();
+  }
+}
 
 async function flushQueue() {
   if (saveInFlight || !pendingPatch) return;
@@ -699,6 +719,7 @@ root.addEventListener("click", (e) => {
   if (!btn || btn.disabled) return;
   const a = ga(btn, "data-a");
   if (a === "refresh") return refreshNow(true);
+  if (a === "lock") return lockScreenNow();
   if (a === "auto") return poller.setEnabled(!poller.getMetrics().enabled);
   if (a === "lang") return toggleLang();
   if (a === "guard") return queueSettings({ guardEnabled: !(curData?.settings?.guardEnabled !== false) });
@@ -812,8 +833,12 @@ root.addEventListener("keydown", (e) => {
   }
 });
 
-const onVis = () => poller.handleVisibilityChange(document.hidden);
-document.addEventListener("visibilitychange", onVis);
+const detachReveal = attachRevealRefresh({
+  doc: document,
+  win: window,
+  target: document.documentElement,
+  poller,
+});
 
 app.ontoolinput = () => {
   if (!curData && !mounted) {
@@ -824,7 +849,7 @@ app.ontoolinput = () => {
 
 app.ontoolresult = (r) => {
   const sc = r?.structuredContent;
-  if (!sc || typeof sc !== "object") return;
+  if (!sc || typeof sc !== "object" || (!sc.unchanged && !sc.policy && !sc.host)) return;
   const prevHash = curHash;
   const hadData = Boolean(curData);
   applyTelemetry(sc);
@@ -837,13 +862,18 @@ app.ontoolresult = (r) => {
   patchAll(curData);
 };
 
-app.onhostcontextchanged = syncHostContext;
+app.onhostcontextchanged = (ctx) => {
+  syncHostContext(ctx);
+  if (ctx?.containerDimensions || ctx?.displayMode) {
+    poller.forceNow("host-context").catch(() => {});
+  }
+};
 app.onteardown = () => {
   clearTimeout(busyTimer);
   clearTimeout(fbTimer);
+  detachReveal();
   poller.destroy();
   brightnessCtrl.destroy();
-  document.removeEventListener("visibilitychange", onVis);
   window.removeEventListener("pointerup", endDrag);
   window.removeEventListener("pointercancel", cancelDrag);
   return {};

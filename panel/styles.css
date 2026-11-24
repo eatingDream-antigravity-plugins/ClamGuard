@@ -82,10 +82,11 @@ button:disabled { opacity: .4; cursor: default; }
 .ib, .ch, .mb, .sb, .pb { transition: background .15s, border-color .15s, color .15s; }
 .ib, .ch { justify-content: center; font-size: 11.5px; flex-shrink: 0; }
 .ib { width: 30px; height: 30px; }
-.ib:hover:not(:disabled), .ch:hover, .mb:hover:not(:disabled), .sb:hover:not(:disabled) { border-color: var(--acb); background: var(--acs); color: var(--fg); }
+.ib:hover:not(:disabled), .ch:hover:not(:disabled), .mb:hover:not(:disabled), .sb:hover:not(:disabled) { border-color: var(--acb); background: var(--acs); color: var(--fg); }
 .ib[data-busy="true"] svg { animation: sp .75s linear infinite; }
 @keyframes sp { to { transform: rotate(360deg); } }
 .ch { gap: 6px; padding: 4px 10px; }
+.lk { gap: 5px; }
 .ch[data-on="true"] { border-color: var(--acb); color: var(--fg); }
 .cd { width: 6px; height: 6px; background: var(--fg3); }
 .ch[data-on="true"] .cd { background: var(--ok); }

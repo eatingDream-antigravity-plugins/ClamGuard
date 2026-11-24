@@ -28,7 +28,7 @@ Mac Clamshell MCP 会监测 Mac 的开合盖、供电和发热状态：合盖时
 - **合盖彻底熄屏，开盖恢复亮度**：只要 Antigravity 运行，内置 MCP 服务（`serve`）就会自动启动带 `flock` 互斥协调的轻量熄屏守护线程——合盖即把内置屏背光降到 0% 并休眠内屏，开盖自动恢复原亮度。如需退出 Antigravity 后仍 24 小时守护，可执行 `mac-clamshell-mcp guard install`。
 - **按状态自动限流降温**：结合开合盖、电池/插电状态以及系统真实热压力（Apple Silicon 读取 `com.apple.system.thermalpressurelevel`，Intel 结合 `pmset` 遥测），自动调整任务调度优先级与并发上限。
 - **开盖时完全不打扰**：平时开着盖子且温度正常时，插件在 Antigravity 里保持静默；进入合盖或发热限流档位后，才会提醒 Agent 自动限制编译并发。
-- **双语面板实时调控**：在侧边栏随时查看状态、一键切换 `EN / 中文`、暂停或开启熄屏守护、手动切换性能档位或调节内建屏幕亮度。
+- **双语面板实时调控与一键锁屏**：在侧边栏随时查看状态、一键切换 `EN / 中文`、暂停或开启熄屏守护、手动切换性能档位、调节内建屏幕亮度，或一键锁屏并保持后台任务继续运行。
 
 ### 四档自动策略
 
@@ -92,6 +92,7 @@ mac-clamshell-mcp guard uninstall
 | :--- | :--- |
 | `clamshell_panel` | 打开控制面板，返回当前开合盖、供电、温度和档位信息。 |
 | `clamshell_set_brightness` | 调节内置屏幕亮度（0% 到 100%）。合盖状态下只会记住开盖后要恢复的亮度，不会误点亮黑屏。 |
+| `clamshell_lock_screen` | 立即锁屏（原生 `SACLockScreenImmediate`，自动回退 `CGSession`/`pmset`），保持 Mac 唤醒不中断后台构建或 Agent。 |
 
 ### 在终端里单独用
 
@@ -108,6 +109,9 @@ mac-clamshell-mcp run --mode eco --jobs 2 --sh "npm run build && npm test"
 # 读取或设置内置屏幕亮度（0-100%）
 mac-clamshell-mcp brightness get
 mac-clamshell-mcp brightness set 60
+
+# 立即锁屏且保持 Mac 唤醒
+mac-clamshell-mcp lock
 
 # 安装、查看或卸载 24/7 常驻合盖熄屏 LaunchAgent
 mac-clamshell-mcp guard install --interval 10
