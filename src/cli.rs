@@ -6,11 +6,11 @@ use crate::launchagent::{
 };
 use crate::mcp::server::serve_stdio;
 use crate::mcp::telemetry::TelemetryEngine;
-use crate::platform::display_ffi::MacOsDisplayBackend;
+use crate::platform::display_ffi::{DisplayBackend, MacOsDisplayBackend};
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::policy::{format_lid, format_power, format_profile, format_thermal, format_topology};
 use crate::runner::{execute_run, RunOptions};
-use crate::state::{load_guard_state, read_settings, resolve_data_dir};
+use crate::state::{load_guard_state, now_epoch_ms, read_settings, resolve_data_dir};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -29,6 +29,9 @@ COMMANDS:
 
   brightness [get | set <0..100>] [--json] [--lid-state open|closed] [--data-dir DIR]
       Read or set built-in display brightness (0-100%) in sync with display guard wake-restore.
+
+  lock [--json] [--data-dir DIR]
+      Lock the macOS screen immediately without putting the Mac to sleep.
 
   guard <install | uninstall | status> [--interval SECS] [--bin PATH] [--json] [--data-dir DIR]
       Install, remove, or inspect the standalone 24/7 macOS LaunchAgent display guard.
@@ -61,6 +64,9 @@ Mac Clamshell MCP — macOS 合盖性能调控、熄屏护眼守护、内建亮�
 
   brightness [get | set <0..100>] [--json] [--lid-state open|closed] [--data-dir DIR]
       读取或设置内建屏幕亮度（0-100%），合盖时安全更新开盖恢复目标。
+
+  lock [--json] [--data-dir DIR]
+      立即锁定 macOS 屏幕并保持 Mac 唤醒，不中断后台构建或 Agent 任务。
 
   guard <install | uninstall | status> [--interval SECS] [--bin PATH] [--json] [--data-dir DIR]
       安装、卸载或查看独立常驻的 macOS LaunchAgent 合盖熄屏守护。
@@ -111,6 +117,7 @@ pub fn run() -> i32 {
         "serve" => cmd_serve(&args[1..]),
         "status" => cmd_status(&args[1..]),
         "brightness" => cmd_brightness(&args[1..]),
+        "lock" => cmd_lock(&args[1..]),
         "guard" => cmd_guard(&args[1..]),
         "run" => cmd_run(&args[1..]),
         "hook" => cmd_hook(&args[1..]),
@@ -505,6 +512,74 @@ fn cmd_brightness(args: &[String]) -> i32 {
                 println!("{}", json!({"error": e}));
             } else {
                 eprintln!("mac-clamshell-mcp brightness set: {e}");
+            }
+            1
+        }
+    }
+}
+
+fn cmd_lock(args: &[String]) -> i32 {
+    let mut json_mode = false;
+    let mut data_dir_opt: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json_mode = true,
+            "--data-dir" => match take_opt_val(args, &mut i, "--data-dir") {
+                Ok(v) => data_dir_opt = Some(PathBuf::from(v)),
+                Err(e) => {
+                    eprintln!("mac-clamshell-mcp lock: {e}");
+                    return 2;
+                }
+            },
+            s if s.starts_with("--data-dir=") => {
+                data_dir_opt = Some(PathBuf::from(&s["--data-dir=".len()..]));
+            }
+            "-h" | "--help" => {
+                println!("{}", usage_str());
+                return 0;
+            }
+            other => {
+                eprintln!("mac-clamshell-mcp lock: unknown option \"{other}\"");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let data_dir = resolve_data_dir(data_dir_opt.as_deref());
+    let settings = read_settings(&data_dir);
+    let lang = detect_lang(Some(&settings));
+    let display = MacOsDisplayBackend;
+
+    match display.lock_screen_now() {
+        Ok(method) => {
+            let locked_at_ms = now_epoch_ms() as u64;
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "ok": true,
+                        "method": method,
+                        "locked_at_ms": locked_at_ms
+                    })
+                );
+            } else {
+                match lang {
+                    Lang::ZhCn => println!("已锁屏（{method}），Mac 将保持唤醒"),
+                    Lang::En => println!("screen locked ({method}); Mac remains awake"),
+                }
+            }
+            0
+        }
+        Err(e) => {
+            if json_mode {
+                println!("{}", json!({"ok": false, "error": e}));
+            } else {
+                match lang {
+                    Lang::ZhCn => eprintln!("mac-clamshell-mcp lock: 锁屏失败: {e}"),
+                    Lang::En => eprintln!("mac-clamshell-mcp lock: {e}"),
+                }
             }
             1
         }

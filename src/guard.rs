@@ -594,6 +594,9 @@ mod tests {
             *self.asleep.lock().unwrap() = true;
             true
         }
+        fn lock_screen_now(&self) -> Result<&'static str, String> {
+            Ok("mock")
+        }
     }
 
     #[test]

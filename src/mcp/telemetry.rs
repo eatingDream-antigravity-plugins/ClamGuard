@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-pub const TELEMETRY_CACHE_TTL_MS: u64 = 2500;
+pub const TELEMETRY_CACHE_TTL_MS: u64 = 1500;
 
 fn lock_unpoisoned<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -382,6 +382,19 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         let mut collected = self.collect(true);
         collected.server_ms = t0.elapsed().as_millis() as u64;
         Ok((collected, action))
+    }
+
+    pub fn detect_lang(&self) -> Lang {
+        let settings = read_settings(&self.data_dir);
+        detect_lang(Some(&settings))
+    }
+
+    pub fn lock_screen(&self) -> Result<(&'static str, u64, u64), String> {
+        let t0 = Instant::now();
+        let method = self.display.lock_screen_now()?;
+        let locked_at_ms = now_epoch_ms() as u64;
+        let server_ms = t0.elapsed().as_millis() as u64;
+        Ok((method, locked_at_ms, server_ms))
     }
 
     fn run_leader(
@@ -770,6 +783,9 @@ mod tests {
         }
         fn sleep_display_now(&self) -> bool {
             true
+        }
+        fn lock_screen_now(&self) -> Result<&'static str, String> {
+            Ok("mock")
         }
     }
 
