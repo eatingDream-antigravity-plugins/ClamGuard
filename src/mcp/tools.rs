@@ -1,3 +1,4 @@
+use crate::i18n::{detect_lang, parse_lang_tag, Lang};
 use crate::mcp::telemetry::{summarize_for_model, TelemetryEngine};
 use crate::platform::display_ffi::{clamp_percent, DisplayBackend};
 use crate::platform::macos::ProbeBackend;
@@ -159,7 +160,7 @@ pub fn list_resources_json() -> Value {
             {
                 "uri": APP_URI,
                 "name": "Mac Clamshell Dashboard",
-                "description": "Live macOS lid state, power, thermal, performance throttling, and built-in display brightness controls.",
+                "description": "Live macOS lid state, power, thermal pressure, performance throttling, display guard, and built-in brightness controls.",
                 "mimeType": APP_MIME,
                 "_meta": {
                     "ui": { "prefersBorder": false }
@@ -212,7 +213,7 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_panel",
                 "title": "Mac Clamshell",
-                "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal status, built-in display brightness, CPU/memory load, and active throttling profile.",
+                "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal pressure, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -231,12 +232,19 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_refresh",
                 "title": "Refresh Clamshell Telemetry",
-                "description": "Fetch fresh macOS lid, power, thermal, display brightness, and policy telemetry. Pass ifHash to receive a minimal { unchanged: true } payload when state has not changed.",
+                "description": "Fetch fresh macOS lid, power, thermal pressure, display brightness, guard status, and policy telemetry. Pass ifHash to receive a minimal { unchanged: true } payload when state has not changed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "ifHash": { "type": "string", "maxLength": 64 },
-                        "force": { "type": "boolean" }
+                        "ifHash": {
+                            "type": "string",
+                            "maxLength": 64,
+                            "description": "Previous telemetry hash for zero-overhead ETag deduplication."
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Bypass short-lived telemetry cache and probe macOS immediately."
+                        }
                     },
                     "additionalProperties": false
                 },
@@ -246,23 +254,41 @@ pub fn list_tools_json() -> Value {
             },
             {
                 "name": "clamshell_configure",
-                "title": "Configure Clamshell Policy",
-                "description": "Persist mode override, max_jobs cap, or closed-AC default profile and return updated telemetry.",
+                "title": "Configure Clamshell Policy & Guard",
+                "description": "Persist performance mode override, max_jobs cap, closed-AC default profile, display guard enable/pause toggle, thermal brightness cap, or language preference and return updated telemetry.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "modeOverride": {
                             "type": "string",
-                            "enum": ["auto", "eco", "utility", "strict", "normal"]
+                            "enum": ["auto", "eco", "utility", "strict", "normal"],
+                            "description": "Performance profile override (auto follows live lid, power, and thermal pressure)."
                         },
                         "maxJobsOverride": {
                             "type": "integer",
                             "minimum": 0,
-                            "maximum": 64
+                            "maximum": 64,
+                            "description": "Explicit parallel job limit override (0 restores automatic profile default)."
                         },
                         "acClosedProfile": {
                             "type": "string",
-                            "enum": ["utility", "eco"]
+                            "enum": ["utility", "eco"],
+                            "description": "Default profile used when the lid is closed on AC power."
+                        },
+                        "guardEnabled": {
+                            "type": "boolean",
+                            "description": "Enable or pause the closed-lid display backlight and thermal guard."
+                        },
+                        "thermalBrightCapPct": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 100,
+                            "description": "Optional open-lid brightness cap (1-100%) applied under serious/critical thermal pressure; 0 disables."
+                        },
+                        "lang": {
+                            "type": "string",
+                            "enum": ["auto", "en", "zh-CN"],
+                            "description": "Preferred UI and CLI language override (auto, en, or zh-CN)."
                         }
                     },
                     "additionalProperties": false
@@ -274,14 +300,15 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_set_brightness",
                 "title": "Set Built-in Display Brightness",
-                "description": "Adjust MacBook built-in display brightness (0-100%) immediately when awake and synchronize the wake-restore target. While lid is closed, updates the saved restore target safely without lighting the closed panel.",
+                "description": "Adjust MacBook built-in display brightness (0-100%) immediately when awake and synchronize the wake-restore target. While lid is closed, updates the saved restore target safely without lighting the closed panel. Returns an error on desktop Macs without a built-in display.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "percent": {
                             "type": "number",
                             "minimum": 0,
-                            "maximum": 100
+                            "maximum": 100,
+                            "description": "Target built-in display brightness percentage (0 to 100)."
                         }
                     },
                     "required": ["percent"],
@@ -327,7 +354,15 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             })
         }
         "clamshell_configure" => {
-            let patch: SettingsPatch = serde_json::from_value(args.clone()).unwrap_or_default();
+            let patch: SettingsPatch = match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Invalid configuration arguments: {e}") }]
+                    });
+                }
+            };
             match engine.configure(&patch) {
                 Ok(collected) => {
                     let mut sc =
@@ -342,17 +377,30 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                         "structuredContent": sc
                     })
                 }
-                Err(err) => json!({
-                    "isError": true,
-                    "content": [{ "type": "text", "text": format!("Configuration update failed: {err}") }]
-                }),
+                Err(err) => {
+                    let msg = match detect_lang(None) {
+                        Lang::ZhCn => format!("更新配置失败: {err}"),
+                        Lang::En => format!("Configuration update failed: {err}"),
+                    };
+                    json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": msg }]
+                    })
+                }
             }
         }
         "clamshell_set_brightness" => {
             let Some(raw_pct) = args.get("percent").and_then(|v| v.as_f64()) else {
+                let msg = match detect_lang(None) {
+                    Lang::ZhCn => "亮度调节失败: percent 必须是 0 到 100 之间的数字".to_string(),
+                    Lang::En => {
+                        "Brightness update failed: percent must be a finite number between 0 and 100"
+                            .to_string()
+                    }
+                };
                 return json!({
                     "isError": true,
-                    "content": [{ "type": "text", "text": "Brightness update failed: percent must be a finite number between 0 and 100" }]
+                    "content": [{ "type": "text", "text": msg }]
                 });
             };
             let clamped = match clamp_percent(raw_pct) {
@@ -364,13 +412,22 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     });
                 }
             };
-            let lid_override = std::env::var("MAC_CLAMSHELL_MOCK_LID").ok().and_then(|v| match v.trim() {
-                "closed" => Some(true),
-                "open" => Some(false),
-                _ => None,
-            });
+            let lid_override = std::env::var("MAC_CLAMSHELL_MOCK_LID")
+                .ok()
+                .and_then(|v| match v.trim() {
+                    "closed" => Some(true),
+                    "open" => Some(false),
+                    _ => None,
+                });
             match engine.set_brightness(clamped as f64, lid_override) {
                 Ok((collected, action)) => {
+                    if action.mode == "unavailable" {
+                        return json!({
+                            "isError": true,
+                            "content": [{ "type": "text", "text": "Brightness update failed: no built-in display detected on this Mac" }]
+                        });
+                    }
+                    let lang = parse_lang_tag(&collected.snapshot.locale).unwrap_or(Lang::En);
                     let mut sc =
                         serde_json::to_value(&*collected.snapshot).unwrap_or_else(|_| json!({}));
                     if let Some(obj) = sc.as_object_mut() {
@@ -382,23 +439,39 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                             serde_json::to_value(&action).unwrap_or_else(|_| json!({})),
                         );
                     }
-                    let note = if action.mode == "saved_target" {
-                        format!("Saved lid-open restore brightness target: {}%", action.saved_percent)
-                    } else {
-                        format!(
+                    let note = match (lang, action.mode.as_str()) {
+                        (Lang::ZhCn, "saved_target") => format!(
+                            "已保存开盖恢复亮度目标: {}%",
+                            action.saved_percent
+                        ),
+                        (Lang::ZhCn, _) => format!(
+                            "内建屏幕亮度已设为 {}%",
+                            action.percent.unwrap_or(clamped)
+                        ),
+                        (Lang::En, "saved_target") => format!(
+                            "Saved lid-open restore brightness target: {}%",
+                            action.saved_percent
+                        ),
+                        (Lang::En, _) => format!(
                             "Built-in display brightness set to {}%",
                             action.percent.unwrap_or(clamped)
-                        )
+                        ),
                     };
                     json!({
                         "content": [{ "type": "text", "text": format!("{note}\n{}", summarize_for_model(&collected.snapshot)) }],
                         "structuredContent": sc
                     })
                 }
-                Err(err) => json!({
-                    "isError": true,
-                    "content": [{ "type": "text", "text": format!("Brightness update failed: {err}") }]
-                }),
+                Err(err) => {
+                    let msg = match detect_lang(None) {
+                        Lang::ZhCn => format!("亮度调节失败: {err}"),
+                        Lang::En => format!("Brightness update failed: {err}"),
+                    };
+                    json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": msg }]
+                    })
+                }
             }
         }
         other => json!({

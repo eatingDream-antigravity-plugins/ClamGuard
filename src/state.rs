@@ -83,6 +83,12 @@ pub struct Settings {
     pub max_jobs_override: u32,
     #[serde(default = "default_ac_closed_profile")]
     pub ac_closed_profile: String,
+    #[serde(default = "default_guard_enabled")]
+    pub guard_enabled: bool,
+    #[serde(default)]
+    pub thermal_bright_cap_pct: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
 }
 
 fn default_mode_override() -> String {
@@ -93,12 +99,19 @@ fn default_ac_closed_profile() -> String {
     "utility".to_string()
 }
 
+fn default_guard_enabled() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             mode_override: default_mode_override(),
             max_jobs_override: 0,
             ac_closed_profile: default_ac_closed_profile(),
+            guard_enabled: true,
+            thermal_bright_cap_pct: 0,
+            lang: None,
         }
     }
 }
@@ -109,6 +122,9 @@ pub struct SettingsPatch {
     pub mode_override: Option<String>,
     pub max_jobs_override: Option<i64>,
     pub ac_closed_profile: Option<String>,
+    pub guard_enabled: Option<bool>,
+    pub thermal_bright_cap_pct: Option<i64>,
+    pub lang: Option<String>,
 }
 
 pub fn read_settings(data_dir: &Path) -> Settings {
@@ -138,10 +154,26 @@ pub fn read_settings(data_dir: &Path) -> Settings {
         .filter(|s| VALID_AC_PROFILES.contains(s))
         .unwrap_or("utility")
         .to_string();
+    let guard_enabled = val
+        .get("guardEnabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let thermal_bright_cap_pct = val
+        .get("thermalBrightCapPct")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.min(100) as u8)
+        .unwrap_or(0);
+    let lang = val
+        .get("lang")
+        .and_then(|v| v.as_str())
+        .and_then(crate::i18n::normalize_setting_lang);
     Settings {
         mode_override,
         max_jobs_override,
         ac_closed_profile,
+        guard_enabled,
+        thermal_bright_cap_pct,
+        lang,
     }
 }
 
@@ -160,6 +192,22 @@ pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Sett
     if let Some(a) = patch.ac_closed_profile.as_deref() {
         if VALID_AC_PROFILES.contains(&a) {
             next.ac_closed_profile = a.to_string();
+        }
+    }
+    if let Some(g) = patch.guard_enabled {
+        next.guard_enabled = g;
+    }
+    if let Some(cap) = patch.thermal_bright_cap_pct {
+        if (0..=100).contains(&cap) {
+            next.thermal_bright_cap_pct = cap as u8;
+        }
+    }
+    if let Some(ref raw_lang) = patch.lang {
+        let trimmed = raw_lang.trim();
+        if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            next.lang = None;
+        } else if matches!(trimmed, "en" | "zh-CN" | "zh" | "zh_CN") {
+            next.lang = crate::i18n::normalize_setting_lang(trimmed);
         }
     }
     let body = serde_json::to_string_pretty(&next)
@@ -182,6 +230,10 @@ pub struct GuardState {
     pub restore_attempts: u32,
     #[serde(default)]
     pub user_target: bool,
+    #[serde(default)]
+    pub thermal_capped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_thermal_brightness: Option<f64>,
 }
 
 fn default_last_lid() -> String {
@@ -201,6 +253,8 @@ impl Default for GuardState {
             needs_restore: false,
             restore_attempts: 0,
             user_target: false,
+            thermal_capped: false,
+            pre_thermal_brightness: None,
         }
     }
 }
@@ -462,12 +516,18 @@ mod tests {
                 mode_override: Some("eco".into()),
                 max_jobs_override: Some(3),
                 ac_closed_profile: Some("eco".into()),
+                guard_enabled: Some(false),
+                thermal_bright_cap_pct: Some(45),
+                lang: Some("zh-CN".into()),
             },
         )
         .unwrap();
         assert_eq!(s.mode_override, "eco");
         assert_eq!(s.max_jobs_override, 3);
         assert_eq!(s.ac_closed_profile, "eco");
+        assert!(!s.guard_enabled);
+        assert_eq!(s.thermal_bright_cap_pct, 45);
+        assert_eq!(s.lang.as_deref(), Some("zh-CN"));
 
         let mode = fs::metadata(settings_path(&dir)).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -479,10 +539,23 @@ mod tests {
                 mode_override: Some("bogus".into()),
                 max_jobs_override: Some(999),
                 ac_closed_profile: Some("bogus".into()),
+                guard_enabled: None,
+                thermal_bright_cap_pct: Some(250),
+                lang: Some("bogus".into()),
             },
         )
         .unwrap();
         assert_eq!(s2, s);
+
+        let s3 = write_settings(
+            &dir,
+            &SettingsPatch {
+                lang: Some("auto".into()),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s3.lang, None);
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -101,8 +101,9 @@ jobs:
             fi
             ARCHIVE="mac-clamshell-mcp-${TAG}-${TARGET}.tar.gz"
             STAGE="$(mktemp -d)"
-            mkdir -p "$STAGE/bin" "$STAGE/panel/dist" "$STAGE/rules" "$STAGE/skills/mac-clamshell" "$STAGE/assets"
+            mkdir -p "$STAGE/bin" "$STAGE/scripts" "$STAGE/panel/dist" "$STAGE/rules" "$STAGE/skills/mac-clamshell" "$STAGE/assets"
             install -m 0755 "$bin" "$STAGE/bin/mac-clamshell-mcp"
+            install -m 0755 scripts/install-launchagent.sh "$STAGE/scripts/install-launchagent.sh"
             cp panel/dist/panel.html "$STAGE/panel/dist/panel.html"
             cp plugin/plugin.json "$STAGE/plugin.json"
             cp plugin/mcp_config.json "$STAGE/mcp_config.json"
@@ -112,6 +113,7 @@ jobs:
             cp assets/logo.svg "$STAGE/assets/logo.svg"
             cp LICENSE "$STAGE/LICENSE"
             cp README.md "$STAGE/README.md"
+            cp README.zh-CN.md "$STAGE/README.zh-CN.md"
             COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" -C "$STAGE" .
             shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
             cat "${ARCHIVE}.sha256"

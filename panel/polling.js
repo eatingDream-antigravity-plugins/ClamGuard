@@ -25,6 +25,7 @@ export function computeAdaptiveIntervalMs({ rttMs = 0, consecutiveErrors = 0 } =
 
 export function createAdaptivePoller({
   fetcher,
+  defaultEnabled = true,
   isHidden = () => (typeof document !== "undefined" ? Boolean(document.hidden) : false),
   shouldSkipBackgroundPoll = () => false,
   onMetrics = () => {},
@@ -34,7 +35,7 @@ export function createAdaptivePoller({
   clearTimer = (id) => clearTimeout(id),
   staleVisibleMs = STALE_ON_VISIBLE_MS,
 } = {}) {
-  let enabled = false;
+  let enabled = Boolean(defaultEnabled);
   let destroyed = false;
   let inFlight = null;
   let queuedUrgent = false;
@@ -65,6 +66,9 @@ export function createAdaptivePoller({
   });
 
   const emitMetrics = () => onMetrics(getMetrics());
+  const syncHidden = () => {
+    pausedHidden = Boolean(isHidden());
+  };
 
   function cancelScheduled() {
     if (timerId !== null) {
@@ -87,14 +91,14 @@ export function createAdaptivePoller({
   function scheduleNext() {
     cancelScheduled();
     if (destroyed || !enabled || isHidden()) {
-      pausedHidden = Boolean(isHidden());
+      syncHidden();
       return;
     }
     pausedHidden = false;
     timerId = setTimer(() => {
       timerId = null;
       if (destroyed || !enabled || isHidden()) {
-        pausedHidden = Boolean(isHidden());
+        syncHidden();
         emitMetrics();
         return;
       }
@@ -109,7 +113,7 @@ export function createAdaptivePoller({
   function trigger({ force = false, reason = "manual" } = {}) {
     if (destroyed) return Promise.resolve(null);
     if (reason === "poll" && (!enabled || isHidden())) {
-      pausedHidden = Boolean(isHidden());
+      syncHidden();
       emitMetrics();
       return Promise.resolve(null);
     }
@@ -202,6 +206,9 @@ export function createAdaptivePoller({
 
   function markInitialBoot(ts = now()) {
     if (lastSuccessTs === 0) lastSuccessTs = ts;
+    pausedHidden = Boolean(isHidden());
+    if (enabled && !pausedHidden && !inFlight && timerId === null) scheduleNext();
+    emitMetrics();
   }
 
   function destroy() {

@@ -133,12 +133,17 @@ if [ ! -f "${STAGE}/bin/mac-clamshell-mcp" ] || [ ! -f "${STAGE}/plugin.json" ];
   exit 1
 fi
 
-mkdir -p "${DEST}/bin" "${DEST}/panel/dist" "${DEST}/rules" "${DEST}/skills/mac-clamshell" "${DEST}/assets"
+mkdir -p "${DEST}/bin" "${DEST}/scripts" "${DEST}/panel/dist" "${DEST}/rules" "${DEST}/skills/mac-clamshell" "${DEST}/assets"
 
 # Atomic binary swap so a running MCP server never sees a truncated executable
 cp "${STAGE}/bin/mac-clamshell-mcp" "${DEST}/bin/mac-clamshell-mcp.new"
 chmod 0755 "${DEST}/bin/mac-clamshell-mcp.new"
 mv -f "${DEST}/bin/mac-clamshell-mcp.new" "${DEST}/bin/mac-clamshell-mcp"
+
+if [ -f "${STAGE}/scripts/install-launchagent.sh" ]; then
+  cp "${STAGE}/scripts/install-launchagent.sh" "${DEST}/scripts/install-launchagent.sh"
+  chmod 0755 "${DEST}/scripts/install-launchagent.sh"
+fi
 
 cp "${STAGE}/panel/dist/panel.html" "${DEST}/panel/dist/panel.html"
 cp "${STAGE}/plugin.json" "${DEST}/plugin.json"
@@ -149,6 +154,8 @@ cp "${STAGE}/skills/mac-clamshell/SKILL.md" "${DEST}/skills/mac-clamshell/SKILL.
 cp "${STAGE}/assets/logo.svg" "${DEST}/assets/logo.svg"
 [ -f "${STAGE}/LICENSE" ] && cp "${STAGE}/LICENSE" "${DEST}/LICENSE"
 [ -f "${STAGE}/README.md" ] && cp "${STAGE}/README.md" "${DEST}/README.md"
+[ -f "${STAGE}/README.zh-CN.md" ] && cp "${STAGE}/README.zh-CN.md" "${DEST}/README.zh-CN.md"
 
 printf 'Installed Mac Clamshell MCP %s (%s) to %s\n' "$VERSION" "$TARGET" "$DEST"
 printf 'Verify: %s/bin/mac-clamshell-mcp status\n' "$DEST"
+printf 'Optional 24/7 standalone LaunchAgent: %s/bin/mac-clamshell-mcp guard install\n' "$DEST"

@@ -1,6 +1,6 @@
 use std::ffi::CString;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 pub trait DisplayBackend: Send + Sync {
@@ -31,6 +31,69 @@ pub fn level_f64_to_percent(level: f64) -> Option<u8> {
         return None;
     }
     Some((level.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+#[derive(Clone, Debug)]
+struct MockDisplayState {
+    mode: String,
+    level: f32,
+    asleep: bool,
+}
+
+fn mock_display_mode() -> Option<String> {
+    if let Ok(m) = std::env::var("MAC_CLAMSHELL_MOCK_DISPLAY") {
+        let t = m.trim();
+        if !t.is_empty() {
+            return Some(t.to_ascii_lowercase());
+        }
+    }
+    let has_mock_bright = std::env::var("MAC_CLAMSHELL_MOCK_BRIGHTNESS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some();
+    let has_mock_lid = std::env::var("MAC_CLAMSHELL_MOCK_LID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .is_some();
+    if has_mock_bright || has_mock_lid {
+        return Some("builtin".to_string());
+    }
+    None
+}
+
+fn mock_state_cell() -> &'static Mutex<Option<MockDisplayState>> {
+    static MOCK: OnceLock<Mutex<Option<MockDisplayState>>> = OnceLock::new();
+    MOCK.get_or_init(|| Mutex::new(None))
+}
+
+fn with_mock_display<R>(f: impl FnOnce(&mut MockDisplayState) -> R) -> Option<R> {
+    let mode = mock_display_mode()?;
+    let mut guard = mock_state_cell().lock().unwrap_or_else(|e| e.into_inner());
+    let needs_init = match guard.as_ref() {
+        Some(st) => st.mode != mode,
+        None => true,
+    };
+    if needs_init {
+        let init_pct = std::env::var("MAC_CLAMSHELL_MOCK_BRIGHTNESS")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .and_then(|v| clamp_percent(v).ok())
+            .unwrap_or(60);
+        let init_closed = std::env::var("MAC_CLAMSHELL_MOCK_LID")
+            .ok()
+            .map(|s| s.trim() == "closed")
+            .unwrap_or(false);
+        *guard = Some(MockDisplayState {
+            mode,
+            level: if init_closed {
+                0.0
+            } else {
+                (init_pct as f32) / 100.0
+            },
+            asleep: init_closed,
+        });
+    }
+    guard.as_mut().map(f)
 }
 
 #[cfg(target_os = "macos")]
@@ -175,6 +238,12 @@ pub struct MacOsDisplayBackend;
 
 impl DisplayBackend for MacOsDisplayBackend {
     fn get_displays(&self) -> (Vec<u32>, Vec<u32>) {
+        if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
+            "none" | "desktop" | "docked" => (Vec::new(), vec![2]),
+            _ => (vec![1], Vec::new()),
+        }) {
+            return res;
+        }
         #[cfg(target_os = "macos")]
         {
             darwin::get_displays()
@@ -186,6 +255,12 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn is_asleep(&self, display_id: u32) -> Option<bool> {
+        if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
+            "none" | "desktop" | "docked" => None,
+            _ => Some(st.asleep),
+        }) {
+            return res;
+        }
         #[cfg(target_os = "macos")]
         {
             darwin::is_asleep(display_id)
@@ -198,6 +273,12 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn get_brightness(&self, display_id: u32) -> Option<f32> {
+        if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
+            "none" | "desktop" | "docked" => None,
+            _ => Some(st.level),
+        }) {
+            return res;
+        }
         #[cfg(target_os = "macos")]
         {
             darwin::get_brightness(display_id)
@@ -210,6 +291,18 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn set_brightness(&self, display_id: u32, level: f32) -> bool {
+        if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
+            "none" | "desktop" | "docked" | "fail_set" => false,
+            _ => {
+                st.level = level.clamp(0.0, 1.0);
+                if st.level > 0.0 {
+                    st.asleep = false;
+                }
+                true
+            }
+        }) {
+            return res;
+        }
         #[cfg(target_os = "macos")]
         {
             darwin::set_brightness(display_id, level)
@@ -222,6 +315,12 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn sleep_display_now(&self) -> bool {
+        if let Some(res) = with_mock_display(|st| {
+            st.asleep = true;
+            true
+        }) {
+            return res;
+        }
         #[cfg(target_os = "macos")]
         {
             let Ok(mut child) = Command::new("/usr/bin/pmset")

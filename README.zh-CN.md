@@ -25,19 +25,27 @@ Mac Clamshell MCP 会监测 Mac 的开合盖、供电和发热状态：合盖时
 
 ## 它能帮你做什么
 
-- **合盖彻底熄屏，开盖恢复亮度**：检测到合盖就自动把内置屏幕背光降到 0% 并让内屏休眠（即使有软件阻止屏幕休眠也能压住），等你重新掀开盖子再自动恢复原来的亮度。
-- **按状态自动限流降温**：根据开合盖、插电还是用电池、以及系统是否发热降频，自动调整任务的 CPU 优先级和并发数。
-- **开盖时完全不打扰**：平时开着盖子且温度正常时，插件在 Antigravity 里保持静默；只有进入合盖或发热限流档位后，才会提醒 Agent 自动限制编译并发。
-- **在面板或对话里调亮度、切档位**：随时在侧边栏看设备状态、临时切回全速，或者直接调节内置屏幕亮度。
+- **合盖彻底熄屏，开盖恢复亮度**：只要 Antigravity 运行，内置 MCP 服务（`serve`）就会自动启动带 `flock` 互斥协调的轻量熄屏守护线程——合盖即把内置屏背光降到 0% 并休眠内屏，开盖自动恢复原亮度。如需退出 Antigravity 后仍 24 小时守护，可执行 `mac-clamshell-mcp guard install`。
+- **按状态自动限流降温**：结合开合盖、电池/插电状态以及系统真实热压力（Apple Silicon 读取 `com.apple.system.thermalpressurelevel`，Intel 结合 `pmset` 遥测），自动调整任务调度优先级与并发上限。
+- **开盖时完全不打扰**：平时开着盖子且温度正常时，插件在 Antigravity 里保持静默；进入合盖或发热限流档位后，才会提醒 Agent 自动限制编译并发。
+- **双语面板实时调控**：在侧边栏随时查看状态、一键切换 `EN / 中文`、暂停或开启熄屏守护、手动切换性能档位或调节内建屏幕亮度。
 
 ### 四档自动策略
 
 | 档位 | 触发条件 | 实际效果 |
 | :--- | :--- | :--- |
-| **Normal** | 开盖且温度正常 | 不限制，全速运行 |
-| **Utility** | 合盖 + 插电 | 降低 CPU 优先级，把并发限制在能效核数量（2 到 4） |
-| **Eco** | 合盖 + 电池供电 | 后台低优先级，最多 2 并发（电量低于等于 20% 时降为 1） |
-| **Strict** | 系统出现明显发热降频 | 最低优先级，单任务串行运行 |
+| **Normal / 正常** | 开盖且温度正常 | 不限制，全速运行 |
+| **Utility / 控温** | 合盖 + 插电 | Utility QoS（`nice 10`），并发限制在能效核数量（`2–4`，Intel 为总核数一半） |
+| **Eco / 节能** | 合盖 + 电池供电 | 后台 QoS（`nice 15`），最多 2 并发（电量低于等于 20% 时降为 1） |
+| **Strict / 强限** | 系统达到严重/临界热压力 | 最低优先级（`taskpolicy -b`、`nice 19`），单任务串行运行 |
+
+## 性能约束与护眼守护的实现原理
+
+Mac Clamshell MCP 只做进程级与用户态调控，不会改动任何系统底层或全局配置：
+
+1. **零 root 权限、零全局侵入**：全程无需 `sudo` 或管理员权限，绝不修改 NVRAM、SMC、内核扩展或全局 `pmset` 电源设置。你 Mac 上的其他应用（浏览器、IDE、音视频、访达等）100% 不受任何影响。
+2. **进程级原生调度原语**：`mac-clamshell-mcp run` 通过 `exec()` 仅对被包裹的构建/测试子进程树生效，调用 macOS 原生 `/usr/sbin/taskpolicy`（Utility/Background QoS，在 Apple Silicon 上优先调度至能效核）+ POSIX `nice` + 标准构建并发环境变量（`CARGO_BUILD_JOBS`、`MAKEFLAGS=-jN`、`CMAKE_BUILD_PARALLEL_LEVEL`、`NINJAJOBS`、`RAYON_NUM_THREADS`、`OMP_NUM_THREADS`、`GOMAXPROCS`、`PYTEST_XDIST_AUTO_NUM_WORKERS` 等）。命令退出后不留任何后台调度残留。
+3. **可逆的用户态护眼熄屏守护**：通过 macOS 标准 `DisplayServices` 用户态接口（与控制中心亮度滑块同一层级）调节背光，并配合本地 `0600` 权限状态文件与 `flock` 文件锁防冲突；开盖或热压力恢复后自动还原原有亮度。
 
 ## 安装
 
@@ -55,13 +63,18 @@ curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh -s -- --version v1.0.0
 ```
 
-### 可选：让合盖熄屏保护常驻后台
+### 可选：退出 Antigravity 后仍 24/7 常驻守护
 
-如果你希望不开 Antigravity 时也保持合盖熄屏保护，可以装一下附带的 macOS LaunchAgent（每 10 秒检查一次）：
+Antigravity 打开期间已自带合盖守护；如希望完全不依赖 Antigravity 也保持常驻保护，可安装 macOS LaunchAgent：
 
 ```sh
-./scripts/install-launchagent.sh --interval 10
+mac-clamshell-mcp guard install --interval 10
+# 随时查看状态或卸载：
+mac-clamshell-mcp guard status
+mac-clamshell-mcp guard uninstall
 ```
+
+（也可以直接在插件目录运行 `./scripts/install-launchagent.sh --interval 10`。）
 
 ## 怎么用
 
@@ -96,7 +109,12 @@ mac-clamshell-mcp run --mode eco --jobs 2 --sh "npm run build && npm test"
 mac-clamshell-mcp brightness get
 mac-clamshell-mcp brightness set 60
 
-# 前台持续运行合盖熄屏保护
+# 安装、查看或卸载 24/7 常驻合盖熄屏 LaunchAgent
+mac-clamshell-mcp guard install --interval 10
+mac-clamshell-mcp guard status
+mac-clamshell-mcp guard uninstall
+
+# 或在前台持续运行合盖熄屏保护
 mac-clamshell-mcp watch --daemon --interval 10
 ```
 
