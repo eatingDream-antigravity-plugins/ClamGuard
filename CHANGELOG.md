@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.0...v1.2.1) (2026-11-24)
+
+
+### Code Refactoring
+
+* deduplicate README/skill docs and tidy helper tests ([#10](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/10)) ([f97bdb7](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/f97bdb76fb4bfb0b2d28bb66fd832972a00b0870))
+
 ## [1.2.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.1.0...v1.2.0) (2026-11-24)
 
 
