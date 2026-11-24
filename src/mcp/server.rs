@@ -270,6 +270,9 @@ mod tests {
         fn sleep_display_now(&self) -> bool {
             true
         }
+        fn lock_screen_now(&self) -> Result<&'static str, String> {
+            Ok("mock")
+        }
     }
 
     #[test]
@@ -315,7 +318,8 @@ mod tests {
                 "clamshell_panel",
                 "clamshell_refresh",
                 "clamshell_configure",
-                "clamshell_set_brightness"
+                "clamshell_set_brightness",
+                "clamshell_lock_screen"
             ]
         );
         // Verify guardEnabled is exposed in English tools/list schema
@@ -346,7 +350,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        // Matching ifHash returns minimal unchanged: true
+        // Matching ifHash returns minimal unchanged: true (including fresh: true live bypass)
         let poll = handle_rpc_value(
             &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":hash,"force":false}}}),
             &engine,
@@ -355,6 +359,40 @@ mod tests {
         .unwrap();
         assert_eq!(poll["result"]["structuredContent"]["unchanged"], true);
         assert_eq!(poll["result"]["content"][0]["text"], "unchanged");
+
+        let fresh_poll = handle_rpc_value(
+            &json!({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":hash,"fresh":true}}}),
+            &engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert_eq!(fresh_poll["result"]["structuredContent"]["unchanged"], true);
+        assert_eq!(fresh_poll["result"]["structuredContent"]["fromCache"], false);
+
+        let fresh_panel = handle_rpc_value(
+            &json!({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"clamshell_panel","arguments":{"fresh":true}}}),
+            &engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert_eq!(fresh_panel["result"]["structuredContent"]["fromCache"], false);
+
+        // Lock screen tool returns { ok: true, method, locked_at_ms }
+        let locked = handle_rpc_value(
+            &json!({"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"clamshell_lock_screen","arguments":{}}}),
+            &engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert!(locked["result"].get("isError").is_none());
+        assert_eq!(locked["result"]["structuredContent"]["ok"], true);
+        assert_eq!(locked["result"]["structuredContent"]["method"], "mock");
+        assert!(
+            locked["result"]["structuredContent"]["locked_at_ms"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
 
         // Closed-lid set_brightness updates saved restore target safely without waking backlight
         let br = handle_rpc_value(

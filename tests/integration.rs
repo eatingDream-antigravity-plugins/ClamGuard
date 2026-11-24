@@ -212,7 +212,7 @@ fn cli_hook_and_mcp_stdio_end_to_end() {
     assert_eq!(init["result"]["serverInfo"]["name"], "mac-clamshell-mcp");
 
     let tools = rpc(2, "tools/list", json!({}));
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 5);
 
     let res = rpc(
         3,
@@ -264,7 +264,68 @@ fn cli_hook_and_mcp_stdio_end_to_end() {
         "utility"
     );
 
+    let cfg_hash = cfg["result"]["structuredContent"]["hash"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let fresh_dedup = rpc(
+        8,
+        "tools/call",
+        json!({"name": "clamshell_refresh", "arguments": {"ifHash": cfg_hash, "fresh": true}}),
+    );
+    assert_eq!(fresh_dedup["result"]["structuredContent"]["unchanged"], true);
+    assert_eq!(fresh_dedup["result"]["structuredContent"]["fromCache"], false);
+
+    let lock_res = rpc(
+        9,
+        "tools/call",
+        json!({"name": "clamshell_lock_screen", "arguments": {}}),
+    );
+    assert!(lock_res["result"].get("isError").is_none());
+    assert_eq!(lock_res["result"]["structuredContent"]["ok"], true);
+    assert_eq!(lock_res["result"]["structuredContent"]["method"], "mock");
+    assert!(
+        lock_res["result"]["structuredContent"]["locked_at_ms"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+
     drop(stdin);
     let _ = child.wait();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cli_lock_json_mock_and_error_path() {
+    let dir = temp_data_dir("lock");
+
+    let ok_out = Command::new(bin_path())
+        .args(["lock", "--json", "--data-dir"])
+        .arg(&dir)
+        .env("MAC_CLAMSHELL_MOCK_DISPLAY", "builtin")
+        .output()
+        .unwrap();
+    assert!(
+        ok_out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&ok_out.stderr)
+    );
+    let ok_v: Value = serde_json::from_slice(&ok_out.stdout).unwrap();
+    assert_eq!(ok_v["ok"], true);
+    assert_eq!(ok_v["method"], "mock");
+    assert!(ok_v["locked_at_ms"].as_u64().unwrap_or(0) > 0);
+
+    let err_out = Command::new(bin_path())
+        .args(["lock", "--json", "--data-dir"])
+        .arg(&dir)
+        .env("MAC_CLAMSHELL_MOCK_DISPLAY", "fail_lock")
+        .output()
+        .unwrap();
+    assert_eq!(err_out.status.code(), Some(1));
+    let err_v: Value = serde_json::from_slice(&err_out.stdout).unwrap();
+    assert_eq!(err_v["ok"], false);
+    assert!(err_v["error"].as_str().unwrap().contains("mock lock screen failed"));
+
     let _ = fs::remove_dir_all(&dir);
 }

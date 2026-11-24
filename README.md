@@ -28,7 +28,7 @@ Mac Clamshell MCP watches your Mac's lid, power, and temperature. It makes sure 
 - **Turns off the closed built-in screen**: While Antigravity is open, the MCP server (`serve`) runs a lightweight, lock-coordinated display guard thread automatically—dropping backlight to 0% and sleeping the internal display when the lid shuts, then restoring your previous brightness on wake. Optionally install the 24/7 LaunchAgent (`mac-clamshell-mcp guard install`) to protect closed-lid displays even when Antigravity is closed.
 - **Throttles heavy builds automatically**: Adapts CPU priority and parallel job limits based on lid state, battery vs. AC power, and macOS thermal pressure (`com.apple.system.thermalpressurelevel` on Apple Silicon plus `pmset` telemetry).
 - **Stays out of the way when open**: When your lid is open and temps are fine, it stays completely silent in Antigravity. As soon as your Mac enters a throttled mode, it nudges the agent to wrap heavy commands and cap concurrency.
-- **Live bilingual panel and brightness control**: Check lid, power, thermal pressure, and guard status in Antigravity (`EN / 中文`), toggle the display guard or override the mode temporarily, or adjust built-in display brightness from the panel or chat.
+- **Live bilingual panel, brightness & one-click lock screen**: Check lid, power, thermal pressure, and guard status in Antigravity (`EN / 中文`), toggle the display guard or override the mode temporarily, adjust built-in display brightness, or lock the screen immediately while keeping background builds awake.
 
 ### Power & thermal modes
 
@@ -92,6 +92,7 @@ You can also ask your agent directly:
 | :--- | :--- |
 | `clamshell_panel` | Opens the live dashboard and reports current lid, power, thermal, and mode status. |
 | `clamshell_set_brightness` | Sets built-in screen brightness (0 to 100%) immediately when open, or updates the wake-restore level while closed without lighting the screen. |
+| `clamshell_lock_screen` | Locks the macOS screen immediately (`SACLockScreenImmediate` with `CGSession`/`pmset` fallback) while keeping the Mac awake for background tasks. |
 
 ### From the terminal
 
@@ -108,6 +109,9 @@ mac-clamshell-mcp run --mode eco --jobs 2 --sh "npm run build && npm test"
 # Read or set built-in screen brightness (0-100%)
 mac-clamshell-mcp brightness get
 mac-clamshell-mcp brightness set 60
+
+# Lock the screen immediately without sleeping the Mac
+mac-clamshell-mcp lock
 
 # Install, inspect, or remove the 24/7 LaunchAgent display guard
 mac-clamshell-mcp guard install --interval 10

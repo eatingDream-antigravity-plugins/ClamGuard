@@ -10,6 +10,7 @@ pub trait DisplayBackend: Send + Sync {
     fn get_brightness(&self, display_id: u32) -> Option<f32>;
     fn set_brightness(&self, display_id: u32, level: f32) -> bool;
     fn sleep_display_now(&self) -> bool;
+    fn lock_screen_now(&self) -> Result<&'static str, String>;
 }
 
 pub fn clamp_percent(value: f64) -> Result<u8, String> {
@@ -38,6 +39,7 @@ struct MockDisplayState {
     mode: String,
     level: f32,
     asleep: bool,
+    locked: bool,
 }
 
 fn mock_display_mode() -> Option<String> {
@@ -91,6 +93,7 @@ fn with_mock_display<R>(f: impl FnOnce(&mut MockDisplayState) -> R) -> Option<R>
                 (init_pct as f32) / 100.0
             },
             asleep: init_closed,
+            locked: false,
         });
     }
     guard.as_mut().map(f)
@@ -109,6 +112,7 @@ mod darwin {
 
     type DsGetBrightnessFn = unsafe extern "C" fn(display: u32, brightness: *mut f32) -> i32;
     type DsSetBrightnessFn = unsafe extern "C" fn(display: u32, brightness: f32) -> i32;
+    type SacLockScreenImmediateFn = unsafe extern "C" fn();
 
     struct CgApi {
         get_online: CgGetOnlineDisplayListFn,
@@ -224,12 +228,66 @@ mod darwin {
         }
     }
 
+    fn sac_lock_fn() -> Option<SacLockScreenImmediateFn> {
+        static SAC: OnceLock<Option<SacLockScreenImmediateFn>> = OnceLock::new();
+        *SAC.get_or_init(|| unsafe {
+            let path = CString::new(
+                "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login",
+            )
+            .ok()?;
+            let handle = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            if handle.is_null() {
+                return None;
+            }
+            let sym = load_sym(handle, "SACLockScreenImmediate")?;
+            Some(std::mem::transmute::<*mut c_void, SacLockScreenImmediateFn>(sym))
+        })
+    }
+
     pub fn set_brightness(display_id: u32, level: f32) -> bool {
         let Some(api) = ds_api() else {
             return false;
         };
         let clamped = level.clamp(0.0, 1.0);
         unsafe { (api.set_brightness)(display_id, clamped) == 0 }
+    }
+
+    pub fn lock_screen_immediate() -> bool {
+        let Some(lock_fn) = sac_lock_fn() else {
+            return false;
+        };
+        unsafe {
+            lock_fn();
+        }
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_cmd_status(cmd: &str, args: &[&str], timeout_ms: u64) -> bool {
+    let Ok(mut child) = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Err(_) => return false,
+        }
     }
 }
 
@@ -323,34 +381,45 @@ impl DisplayBackend for MacOsDisplayBackend {
         }
         #[cfg(target_os = "macos")]
         {
-            let Ok(mut child) = Command::new("/usr/bin/pmset")
-                .arg("displaysleepnow")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            else {
-                return false;
-            };
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return status.success(),
-                    Ok(None) => {
-                        if Instant::now() >= deadline {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return false;
-                        }
-                        std::thread::sleep(Duration::from_millis(15));
-                    }
-                    Err(_) => return false,
-                }
-            }
+            run_cmd_status("/usr/bin/pmset", &["displaysleepnow"], 3000)
         }
         #[cfg(not(target_os = "macos"))]
         {
             false
+        }
+    }
+
+    fn lock_screen_now(&self) -> Result<&'static str, String> {
+        if let Some(res) = with_mock_display(|st| {
+            if st.mode == "fail_lock" {
+                Err("mock lock screen failed".to_string())
+            } else {
+                st.locked = true;
+                Ok("mock")
+            }
+        }) {
+            return res;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if darwin::lock_screen_immediate() {
+                return Ok("SACLockScreenImmediate");
+            }
+            if run_cmd_status(
+                "/System/Library/CoreServices/Menu Extras/User.menu/Contents/Resources/CGSession",
+                &["-suspend"],
+                3000,
+            ) {
+                return Ok("CGSession");
+            }
+            if run_cmd_status("/usr/bin/pmset", &["displaysleepnow"], 3000) {
+                return Ok("pmset");
+            }
+            Err("failed to lock screen via SACLockScreenImmediate, CGSession, or pmset".to_string())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err("lock screen is only supported on macOS".to_string())
         }
     }
 }
@@ -358,6 +427,11 @@ impl DisplayBackend for MacOsDisplayBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mock_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn clamp_percent_validates_and_clamps() {
@@ -367,5 +441,36 @@ mod tests {
         assert_eq!(clamp_percent(150.0).unwrap(), 100);
         assert!(clamp_percent(f64::NAN).is_err());
         assert!(clamp_percent(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn mock_lock_screen_sets_locked_state_and_supports_error_mode() {
+        let _guard = mock_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let prev_disp = std::env::var("MAC_CLAMSHELL_MOCK_DISPLAY").ok();
+
+        std::env::set_var("MAC_CLAMSHELL_MOCK_DISPLAY", "builtin");
+        {
+            let mut st = mock_state_cell().lock().unwrap_or_else(|e| e.into_inner());
+            *st = None;
+        }
+
+        let backend = MacOsDisplayBackend;
+        let method = backend.lock_screen_now().expect("mock lock should succeed");
+        assert_eq!(method, "mock");
+        let is_locked = with_mock_display(|st| st.locked).unwrap_or(false);
+        assert!(is_locked, "expected MockDisplayState.locked to be true");
+
+        std::env::set_var("MAC_CLAMSHELL_MOCK_DISPLAY", "fail_lock");
+        let err = backend.lock_screen_now().unwrap_err();
+        assert!(err.contains("mock lock screen failed"));
+
+        match prev_disp {
+            Some(v) => std::env::set_var("MAC_CLAMSHELL_MOCK_DISPLAY", v),
+            None => std::env::remove_var("MAC_CLAMSHELL_MOCK_DISPLAY"),
+        }
+        {
+            let mut st = mock_state_cell().lock().unwrap_or_else(|e| e.into_inner());
+            *st = None;
+        }
     }
 }

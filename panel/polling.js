@@ -1,22 +1,37 @@
-// Strict single-flight adaptive polling controller for high-latency links.
+// Strict single-flight RTT-adaptive polling (foreground + background) & reveal refresh.
 
-export const POLL_INTERVAL_FAST_MS = 15_000;
-export const POLL_INTERVAL_MED_MS = 22_000;
-export const POLL_INTERVAL_SLOW_MS = 35_000;
-export const POLL_INTERVAL_ULTRA_SLOW_MS = 60_000;
+export const POLL_INTERVAL_FAST_MS = 3_000;
+export const POLL_INTERVAL_MED_MS = 5_000;
+export const POLL_INTERVAL_SLOW_MS = 10_000;
+export const POLL_INTERVAL_ULTRA_SLOW_MS = 20_000;
+
+export const BG_POLL_INTERVAL_FAST_MS = 6_000;
+export const BG_POLL_INTERVAL_MED_MS = 10_000;
+export const BG_POLL_INTERVAL_SLOW_MS = 18_000;
+export const BG_POLL_INTERVAL_ULTRA_SLOW_MS = 30_000;
+
 export const POLL_INTERVAL_MAX_BACKOFF_MS = 120_000;
 
 export const RTT_MED_THRESHOLD_MS = 150;
 export const RTT_HIGH_THRESHOLD_MS = 350;
 export const RTT_VERY_HIGH_THRESHOLD_MS = 800;
-export const STALE_ON_VISIBLE_MS = 30_000;
+export const REVEAL_THROTTLE_MS = 250;
+export const POINTER_STALE_MS = 900;
 
-export function computeAdaptiveIntervalMs({ rttMs = 0, consecutiveErrors = 0 } = {}) {
+export function computeAdaptiveIntervalMs({
+  rttMs = 0,
+  consecutiveErrors = 0,
+  hidden = false,
+} = {}) {
   const rtt = Number.isFinite(rttMs) && rttMs > 0 ? rttMs : 0;
-  let base = POLL_INTERVAL_FAST_MS;
-  if (rtt > RTT_VERY_HIGH_THRESHOLD_MS) base = POLL_INTERVAL_ULTRA_SLOW_MS;
-  else if (rtt > RTT_HIGH_THRESHOLD_MS) base = POLL_INTERVAL_SLOW_MS;
-  else if (rtt > RTT_MED_THRESHOLD_MS) base = POLL_INTERVAL_MED_MS;
+  let base = hidden ? BG_POLL_INTERVAL_FAST_MS : POLL_INTERVAL_FAST_MS;
+  if (rtt > RTT_VERY_HIGH_THRESHOLD_MS) {
+    base = hidden ? BG_POLL_INTERVAL_ULTRA_SLOW_MS : POLL_INTERVAL_ULTRA_SLOW_MS;
+  } else if (rtt > RTT_HIGH_THRESHOLD_MS) {
+    base = hidden ? BG_POLL_INTERVAL_SLOW_MS : POLL_INTERVAL_SLOW_MS;
+  } else if (rtt > RTT_MED_THRESHOLD_MS) {
+    base = hidden ? BG_POLL_INTERVAL_MED_MS : POLL_INTERVAL_MED_MS;
+  }
 
   const errs = Math.max(0, Math.floor(Number(consecutiveErrors) || 0));
   if (errs <= 0) return base;
@@ -33,7 +48,7 @@ export function createAdaptivePoller({
   perfNow = () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (id) => clearTimeout(id),
-  staleVisibleMs = STALE_ON_VISIBLE_MS,
+  revealThrottleMs = REVEAL_THROTTLE_MS,
 } = {}) {
   let enabled = Boolean(defaultEnabled);
   let destroyed = false;
@@ -46,15 +61,17 @@ export function createAdaptivePoller({
   let lastNetRttMs = null;
   let ewmaRttMs = null;
   let consecutiveErrors = 0;
-  let currentIntervalMs = POLL_INTERVAL_FAST_MS;
+  let inBackground = Boolean(isHidden());
+  let currentIntervalMs = computeAdaptiveIntervalMs({ rttMs: 0, consecutiveErrors: 0, hidden: inBackground });
   let lastSuccessTs = 0;
+  let lastForceTs = -Infinity;
   let unchangedHits = 0;
-  let pausedHidden = Boolean(isHidden());
 
   const getMetrics = () => ({
     enabled,
     inFlight: Boolean(inFlight),
-    pausedHidden,
+    inBackground,
+    pausedHidden: false,
     lastTotalMs,
     lastServerMs,
     lastNetRttMs,
@@ -66,8 +83,13 @@ export function createAdaptivePoller({
   });
 
   const emitMetrics = () => onMetrics(getMetrics());
-  const syncHidden = () => {
-    pausedHidden = Boolean(isHidden());
+  const recomputeInterval = () => {
+    inBackground = Boolean(isHidden());
+    currentIntervalMs = computeAdaptiveIntervalMs({
+      rttMs: ewmaRttMs ?? 0,
+      consecutiveErrors,
+      hidden: inBackground,
+    });
   };
 
   function cancelScheduled() {
@@ -85,20 +107,16 @@ export function createAdaptivePoller({
     lastServerMs = cleanServer;
     lastNetRttMs = netRtt;
     ewmaRttMs = ewmaRttMs === null ? netRtt : Math.round(ewmaRttMs * 0.65 + netRtt * 0.35);
-    currentIntervalMs = computeAdaptiveIntervalMs({ rttMs: ewmaRttMs, consecutiveErrors });
+    recomputeInterval();
   }
 
   function scheduleNext() {
     cancelScheduled();
-    if (destroyed || !enabled || isHidden()) {
-      syncHidden();
-      return;
-    }
-    pausedHidden = false;
+    if (destroyed || !enabled) return;
+    recomputeInterval();
     timerId = setTimer(() => {
       timerId = null;
-      if (destroyed || !enabled || isHidden()) {
-        syncHidden();
+      if (destroyed || !enabled) {
         emitMetrics();
         return;
       }
@@ -112,8 +130,7 @@ export function createAdaptivePoller({
 
   function trigger({ force = false, reason = "manual" } = {}) {
     if (destroyed) return Promise.resolve(null);
-    if (reason === "poll" && (!enabled || isHidden())) {
-      syncHidden();
+    if (reason === "poll" && !enabled) {
       emitMetrics();
       return Promise.resolve(null);
     }
@@ -138,19 +155,17 @@ export function createAdaptivePoller({
         return res;
       } catch (err) {
         consecutiveErrors += 1;
-        currentIntervalMs = computeAdaptiveIntervalMs({
-          rttMs: ewmaRttMs ?? 0,
-          consecutiveErrors,
-        });
+        recomputeInterval();
         throw err;
       } finally {
         inFlight = null;
+        recomputeInterval();
         emitMetrics();
         if (!destroyed) {
-          if (queuedUrgent && !isHidden()) {
+          if (queuedUrgent) {
             queuedUrgent = false;
             trigger({ force: true, reason: "queued" }).catch(() => {});
-          } else if (enabled && !isHidden()) {
+          } else if (enabled) {
             scheduleNext();
           }
         }
@@ -162,11 +177,25 @@ export function createAdaptivePoller({
     return run;
   }
 
+  function forceNow(reason = "reveal") {
+    if (destroyed) return Promise.resolve(null);
+    const t = now();
+    if (t - lastForceTs < revealThrottleMs) {
+      return inFlight || Promise.resolve(null);
+    }
+    lastForceTs = t;
+    return trigger({ force: true, reason });
+  }
+
+  function isStale(maxAgeMs = POINTER_STALE_MS) {
+    return lastSuccessTs === 0 || now() - lastSuccessTs > maxAgeMs;
+  }
+
   function setEnabled(next) {
     enabled = Boolean(next);
     cancelScheduled();
-    pausedHidden = Boolean(isHidden());
-    if (enabled && !pausedHidden && !inFlight) scheduleNext();
+    recomputeInterval();
+    if (enabled && !inFlight) scheduleNext();
     emitMetrics();
     return enabled;
   }
@@ -174,18 +203,22 @@ export function createAdaptivePoller({
   function handleVisibilityChange(hiddenOverride) {
     if (destroyed) return;
     const hidden = hiddenOverride !== undefined ? Boolean(hiddenOverride) : Boolean(isHidden());
-    const wasHidden = pausedHidden;
-    pausedHidden = hidden;
+    const wasHidden = inBackground;
+    inBackground = hidden;
+    currentIntervalMs = computeAdaptiveIntervalMs({
+      rttMs: ewmaRttMs ?? 0,
+      consecutiveErrors,
+      hidden,
+    });
 
     if (hidden) {
-      cancelScheduled();
+      if (enabled && !inFlight) scheduleNext();
       emitMetrics();
       return;
     }
 
-    const isStale = lastSuccessTs > 0 && now() - lastSuccessTs >= staleVisibleMs;
-    if (wasHidden && (enabled || isStale)) {
-      trigger({ force: false, reason: "visibility" }).catch(() => {});
+    if (wasHidden) {
+      forceNow("visibility").catch(() => {});
     } else if (enabled && !inFlight) {
       scheduleNext();
       emitMetrics();
@@ -206,8 +239,8 @@ export function createAdaptivePoller({
 
   function markInitialBoot(ts = now()) {
     if (lastSuccessTs === 0) lastSuccessTs = ts;
-    pausedHidden = Boolean(isHidden());
-    if (enabled && !pausedHidden && !inFlight && timerId === null) scheduleNext();
+    recomputeInterval();
+    if (enabled && !inFlight && timerId === null) scheduleNext();
     emitMetrics();
   }
 
@@ -220,11 +253,91 @@ export function createAdaptivePoller({
 
   return {
     trigger,
+    forceNow,
+    isStale,
     setEnabled,
     handleVisibilityChange,
     recordExternalRpc,
     markInitialBoot,
     getMetrics,
     destroy,
+  };
+}
+
+export function attachRevealRefresh({
+  doc = typeof document !== "undefined" ? document : null,
+  win = typeof window !== "undefined" ? window : null,
+  target = doc?.documentElement || null,
+  poller,
+  onReveal = (reason) => poller?.forceNow?.(reason)?.catch?.(() => {}),
+  ResizeObserverCtor = typeof ResizeObserver !== "undefined" ? ResizeObserver : null,
+  IntersectionObserverCtor = typeof IntersectionObserver !== "undefined" ? IntersectionObserver : null,
+  stalePointerMs = POINTER_STALE_MS,
+} = {}) {
+  const cleanups = [];
+  const reveal = (reason) => onReveal?.(reason);
+
+  if (ResizeObserverCtor && target) {
+    const r0 = target.getBoundingClientRect?.();
+    let wasCollapsed = r0 ? r0.width <= 0 || r0.height <= 0 : false;
+    const ro = new ResizeObserverCtor((entries) => {
+      const rect = entries?.[entries.length - 1]?.contentRect || target.getBoundingClientRect?.();
+      if (!rect) return;
+      const collapsed = rect.width <= 0 || rect.height <= 0;
+      if (wasCollapsed && !collapsed) reveal("resize");
+      wasCollapsed = collapsed;
+    });
+    ro.observe(target);
+    cleanups.push(() => ro.disconnect());
+  }
+
+  if (IntersectionObserverCtor && target) {
+    let wasVis = typeof doc?.hidden === "boolean" ? !doc.hidden : false;
+    const io = new IntersectionObserverCtor(
+      (entries) => {
+        const entry = entries?.[entries.length - 1];
+        if (!entry) return;
+        const vis = Boolean(entry.isIntersecting);
+        if (!wasVis && vis) reveal("intersection");
+        wasVis = vis;
+      },
+      { threshold: 0 }
+    );
+    io.observe(target);
+    cleanups.push(() => io.disconnect());
+  }
+
+  if (doc?.addEventListener) {
+    const onVis = () => poller?.handleVisibilityChange?.(doc.hidden);
+    doc.addEventListener("visibilitychange", onVis);
+    cleanups.push(() => doc.removeEventListener("visibilitychange", onVis));
+  }
+
+  if (win?.addEventListener) {
+    const onFocus = () => reveal("focus");
+    const onPageShow = () => reveal("pageshow");
+    win.addEventListener("focus", onFocus);
+    win.addEventListener("pageshow", onPageShow);
+    cleanups.push(() => {
+      win.removeEventListener("focus", onFocus);
+      win.removeEventListener("pageshow", onPageShow);
+    });
+  }
+
+  if (target?.addEventListener) {
+    const onEnter = () => {
+      if (!poller?.isStale || poller.isStale(stalePointerMs)) reveal("pointerenter");
+    };
+    target.addEventListener("pointerenter", onEnter, { passive: true });
+    cleanups.push(() => target.removeEventListener("pointerenter", onEnter));
+  }
+
+  return () => {
+    for (const fn of cleanups) {
+      try {
+        fn();
+      } catch {}
+    }
+    cleanups.length = 0;
   };
 }

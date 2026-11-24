@@ -2,7 +2,7 @@
   "name": "mac-clamshell-mcp",
   "displayName": "Mac Clamshell MCP",
   "version": "1.1.0",
-  "description": "Native Rust macOS clamshell performance throttling, display thermal guard, built-in brightness control, and low-bandwidth MCP dashboard.",
+  "description": "Native Rust macOS clamshell performance throttling, display thermal guard, built-in brightness control, one-click lock screen, and low-bandwidth MCP dashboard.",
   "author": "eatingDream",
   "homepage": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
   "repository": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
@@ -10,6 +10,6 @@
   "suggestedPrompts": [
     "Check my Mac's lid state, battery, thermal pressure, and active clamshell mode",
     "Run the current build or test suite using clamshell power-saving throttling",
-    "Dim the built-in display brightness to 30% or open the Mac Clamshell panel"
+    "Dim the built-in display brightness to 30%, lock the screen, or open the Mac Clamshell panel"
   ]
 }
