@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.1.0...v1.2.0) (2026-11-24)
+
+
+### Features
+
+* add one-click lock screen and background/reveal panel refresh ([#9](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/9)) ([8ad6dd6](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/8ad6dd6a3ab23c682c7074862ccbc64d30b20c20))
+
+
+### Bug Fixes
+
+* **docs:** serve release badge from first-party assets/release-badge.svg ([#8](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/8)) ([8f6ea84](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/8f6ea849569486154bb98184f40745cabd9eb23c))
+* **docs:** use shields static/v1 query URL so release-please preserves badge color ([#7](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/7)) ([c363811](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/c3638110d59c233693c8cf5feec5ec098cd3d0f8))
+
+
+### Documentation
+
+* replace dynamic release badge with auto-bumped static badge ([#5](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/5)) ([ee21fd0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/ee21fd04e672c021c5edd5a8bdb49380ad9ac467))
+
 ## [1.1.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.0.0...v1.1.0) (2026-11-24)
 
 
