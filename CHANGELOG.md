@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.0.0...v1.1.0) (2026-11-24)
+
+
+### Features
+
+* add active display guard, thermal pressure FFI, bilingual UI cleanup, and safety docs ([#4](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/4)) ([50910a1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/50910a143e474521b570e591b0e4d456cc8ad52f))
+
+
+### Documentation
+
+* **readme:** rewrite bilingual READMEs for human readability and usage focus ([#1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/1)) ([9718097](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/9718097ad2609a3a03d20355ab7275e7e858069d))
+
 ## [1.0.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases/tag/v1.0.0) (2026-11-23)
 
 ### Features
