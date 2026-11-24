@@ -7,7 +7,7 @@
 **让合盖干活的 MacBook 保持凉快安静，同时确保合盖后内置屏幕彻底熄灭。**
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/eatingDream-antigravity-plugins/mac-clamshell-mcp?color=D97757&label=release)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
+[![Release](https://img.shields.io/badge/release-v1.1.0-D97757)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)<!-- x-release-please-version -->
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 
