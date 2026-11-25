@@ -12,7 +12,32 @@ use std::time::Duration;
 
 pub const MIN_SLEEP_DEBOUNCE_SECS: f64 = 15.0;
 pub const FALLBACK_REENFORCE_SECS: f64 = 300.0;
-pub const MAX_RESTORE_ATTEMPTS: u32 = 3;
+pub const MAX_RESTORE_ATTEMPTS: u32 = 12;
+pub const POST_RESTORE_WATCH_SECS: f64 = 6.0;
+pub const OPEN_SYNC_EPSILON: f64 = 0.015;
+pub const FAST_POLL_INTERVAL_MS: u64 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardTickOutcome {
+    pub paused: bool,
+    pub changed: bool,
+    pub fast_poll: bool,
+    pub open_restoring: bool,
+}
+
+pub fn in_post_restore_watch(state: &GuardState, now: f64) -> bool {
+    state.last_restore_ts > 0.0
+        && (now - state.last_restore_ts) >= 0.0
+        && (now - state.last_restore_ts) <= POST_RESTORE_WATCH_SECS
+}
+
+pub fn guard_wants_fast_poll(state: &GuardState, now: f64) -> bool {
+    state.last_lid == "closed" || state.needs_restore || in_post_restore_watch(state, now)
+}
+
+pub fn guard_is_open_restoring(state: &GuardState, now: f64) -> bool {
+    state.last_lid == "open" && (state.needs_restore || in_post_restore_watch(state, now))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,6 +190,7 @@ pub fn apply_user_brightness(
         next.restore_attempts = 0;
         next.thermal_capped = false;
         next.pre_thermal_brightness = None;
+        next.last_restore_ts = 0.0;
         let changed = next != *state;
         return Ok((
             next,
@@ -194,6 +220,7 @@ pub fn apply_user_brightness(
         next.restore_attempts = 0;
         next.thermal_capped = false;
         next.pre_thermal_brightness = None;
+        next.last_restore_ts = 0.0;
         let changed = next != *state;
         return Ok((
             next,
@@ -233,6 +260,7 @@ pub fn apply_user_brightness(
     next.last_lid = "open".to_string();
     next.thermal_capped = false;
     next.pre_thermal_brightness = None;
+    next.last_restore_ts = 0.0;
     let changed = next != *state;
 
     Ok((
@@ -270,12 +298,6 @@ pub fn evaluate_guard_tick_with_thermal(
     let high_thermal = matches!(thermal_pressure, "serious" | "critical");
     let want_thermal_cap = !is_closed && high_thermal && (1..=100).contains(&thermal_cap_pct);
 
-    // Fast path: steady-state open, nothing pending restore, and no thermal brightness cap work -> skip CoreGraphics FFI.
-    if !is_closed && prev_lid == "open" && !needs_restore && !want_thermal_cap && !next.thermal_capped
-    {
-        return (next, false);
-    }
-
     let (builtins, externals) = display.get_displays();
 
     if is_closed {
@@ -287,7 +309,9 @@ pub fn evaluate_guard_tick_with_thermal(
         };
         next.thermal_capped = false;
         next.pre_thermal_brightness = None;
+        next.last_restore_ts = 0.0;
 
+        let mut dimmed_any = false;
         for &did in &builtins {
             if let Some(cur) = display.get_brightness(did) {
                 if cur > 0.01 {
@@ -301,12 +325,17 @@ pub fn evaluate_guard_tick_with_thermal(
                     }
                     if display.set_brightness(did, 0.0) {
                         next.needs_restore = true;
+                        dimmed_any = true;
                     }
                 }
             }
         }
-        if builtins.is_empty() && pre_cap_restore.is_some() && !was_closed {
-            next.saved_brightness = pre_cap_restore.unwrap();
+        if !dimmed_any && !was_closed {
+            if let Some(pre) = pre_cap_restore {
+                next.saved_brightness = pre;
+                next.user_target = false;
+                next.needs_restore = true;
+            }
         }
 
         if externals.is_empty() {
@@ -341,35 +370,64 @@ pub fn evaluate_guard_tick_with_thermal(
         };
         let desired = if user_target {
             saved.clamp(0.0, 1.0)
+        } else if saved > 0.01 {
+            saved.clamp(0.05, 1.0)
         } else {
-            saved.clamp(0.15, 1.0)
+            0.20
         };
         let cap_f64 = (thermal_cap_pct as f64) / 100.0;
-        let target = if want_thermal_cap && desired > cap_f64 {
-            next.pre_thermal_brightness = Some(desired);
-            next.thermal_capped = true;
+        let apply_cap = want_thermal_cap && desired > cap_f64;
+        let target = if apply_cap {
             cap_f64 as f32
         } else {
             desired as f32
         };
 
-        let attempts = next.restore_attempts.saturating_add(1);
+        let mut any_asleep = false;
+        let mut wrote_any = false;
         let restored_ok = if user_target && target < 0.01 {
             true
         } else if !builtins.is_empty() {
             let mut all_ok = true;
             for &did in &builtins {
-                let cur = display.get_brightness(did);
-                if !user_target && !want_thermal_cap && cur.map(|c| c >= 0.02).unwrap_or(false) {
+                if display.is_asleep(did) == Some(true) {
+                    any_asleep = true;
+                    all_ok = false;
                     continue;
                 }
-                if (user_target || want_thermal_cap)
-                    && cur.map(|c| (c - target).abs() <= 0.02).unwrap_or(false)
-                {
+                let cur = display.get_brightness(did);
+                // When we dimmed the screen (`needs_restore`), or user set a closed-lid target,
+                // or thermal capping is active, require brightness to match `target` rather than
+                // skipping on any `cur >= 0.02` (which left the screen dim after Auto-Brightness
+                // or a single F2 tap woke it at 3-10%).
+                let match_tol = (target * 0.4).clamp(0.005, 0.02);
+                let already_ok = if needs_restore || user_target || apply_cap {
+                    cur.map(|c| (c - target).abs() <= match_tol).unwrap_or(false)
+                } else {
+                    // We never dimmed this display while closed; if macOS woke it to a visible
+                    // level on its own, keep and sync that level instead of overriding it.
+                    cur.map(|c| c >= 0.02).unwrap_or(false)
+                };
+                if already_ok {
+                    if !needs_restore && !user_target && !apply_cap {
+                        if let Some(c) = cur {
+                            next.saved_brightness = ((c as f64) * 1000.0).round() / 1000.0;
+                        }
+                    }
                     continue;
                 }
                 if !display.set_brightness(did, target) {
                     all_ok = false;
+                    continue;
+                }
+                wrote_any = true;
+                // Read back to catch writes silently ignored during WindowServer's wake transition.
+                // Scale tolerance with target so dropped writes to 0.0 are caught even at the 5% floor.
+                let tol = (target * 0.4).clamp(0.005, 0.05);
+                if let Some(after) = display.get_brightness(did) {
+                    if (after - target).abs() > tol {
+                        all_ok = false;
+                    }
                 }
             }
             all_ok
@@ -377,15 +435,36 @@ pub fn evaluate_guard_tick_with_thermal(
             false
         };
 
-        if restored_ok || attempts >= MAX_RESTORE_ATTEMPTS {
+        if restored_ok {
+            if apply_cap {
+                next.pre_thermal_brightness = Some(desired);
+                next.thermal_capped = true;
+            }
             next.last_lid = "open".to_string();
             next.needs_restore = false;
             next.restore_attempts = 0;
             next.user_target = false;
-        } else {
+            if wrote_any && target >= 0.05 {
+                next.last_restore_ts = now;
+            } else {
+                next.last_restore_ts = 0.0;
+            }
+        } else if any_asleep {
+            // Built-in panel is still asleep after lid open: stay pending without exhausting retries.
             next.last_lid = "open".to_string();
             next.needs_restore = true;
-            next.restore_attempts = attempts;
+        } else {
+            let attempts = next.restore_attempts.saturating_add(1);
+            if attempts >= MAX_RESTORE_ATTEMPTS {
+                next.last_lid = "open".to_string();
+                next.needs_restore = false;
+                next.restore_attempts = 0;
+                next.user_target = false;
+            } else {
+                next.last_lid = "open".to_string();
+                next.needs_restore = true;
+                next.restore_attempts = attempts;
+            }
         }
         let changed = next != *state;
         return (next, changed);
@@ -394,6 +473,12 @@ pub fn evaluate_guard_tick_with_thermal(
     // Steady-state open lid: enforce or lift optional thermal brightness cap.
     if want_thermal_cap {
         let cap_level = ((thermal_cap_pct as f32) / 100.0).clamp(0.01, 1.0);
+        let clobber_watch = in_post_restore_watch(&next, now);
+        let saved_target = if next.saved_brightness.is_finite() && next.saved_brightness > 0.01 {
+            next.saved_brightness.clamp(0.05, 1.0) as f32
+        } else {
+            0.20
+        };
         for &did in &builtins {
             if display.is_asleep(did) == Some(true) {
                 continue;
@@ -406,7 +491,10 @@ pub fn evaluate_guard_tick_with_thermal(
                     }
                     if display.set_brightness(did, cap_level) {
                         next.thermal_capped = true;
+                        next.last_restore_ts = 0.0;
                     }
+                } else if clobber_watch && cur < 0.02 {
+                    let _ = display.set_brightness(did, saved_target.min(cap_level));
                 }
             }
         }
@@ -428,6 +516,40 @@ pub fn evaluate_guard_tick_with_thermal(
         if all_ok || builtins.is_empty() {
             next.thermal_capped = false;
             next.pre_thermal_brightness = None;
+        }
+    } else if in_post_restore_watch(&next, now) {
+        // Post-wake clobber watch: macOS loginwindow / CoreBrightness can reset brightness back
+        // to ~0% 1-3s after Display is turned on. Re-apply saved brightness if it drops to black
+        // (<2%), while leaving any normal manual adjustment (>=2%) untouched.
+        let saved = if next.saved_brightness.is_finite() && next.saved_brightness > 0.01 {
+            next.saved_brightness.clamp(0.05, 1.0)
+        } else {
+            0.20
+        };
+        let target = saved as f32;
+        for &did in &builtins {
+            if display.is_asleep(did) == Some(true) {
+                continue;
+            }
+            if let Some(cur) = display.get_brightness(did) {
+                if cur < 0.02 {
+                    let _ = display.set_brightness(did, target);
+                }
+            }
+        }
+    } else if let Some(&primary) = builtins.first() {
+        // Keep `saved_brightness` fresh while open & awake so keyboard/Control Center adjustments
+        // are preserved even if macOS fades or disconnects the panel before our closed-lid tick.
+        if display.is_asleep(primary) != Some(true) {
+            if let Some(cur) = display.get_brightness(primary) {
+                if cur > 0.01 {
+                    let rounded = ((cur as f64) * 1000.0).round() / 1000.0;
+                    if (rounded - next.saved_brightness).abs() >= OPEN_SYNC_EPSILON {
+                        next.saved_brightness = rounded;
+                        next.user_target = false;
+                    }
+                }
+            }
         }
     }
 
@@ -471,42 +593,65 @@ pub fn set_brightness_synced(
 }
 
 /// Run one lock-coordinated Display Guard tick if `settings.guard_enabled` is true.
-/// Returns `Ok(None)` when paused via settings, `Ok(Some(false))` when another guard holds the lock
-/// or state did not change, and `Ok(Some(true))` when guard state changed on disk.
 pub fn run_guard_tick_locked(
     data_dir: &Path,
     probe: &dyn ProbeBackend,
     display: &dyn DisplayBackend,
-) -> Result<Option<bool>, String> {
+) -> Result<GuardTickOutcome, String> {
     let settings = read_settings(data_dir);
     if !settings.guard_enabled {
-        return Ok(None);
+        return Ok(GuardTickOutcome {
+            paused: true,
+            changed: false,
+            fast_poll: false,
+            open_restoring: false,
+        });
     }
     let Ok(Some(_lock)) = FileLock::acquire(data_dir, false) else {
-        return Ok(Some(false));
+        return Ok(GuardTickOutcome {
+            paused: false,
+            changed: false,
+            fast_poll: false,
+            open_restoring: false,
+        });
     };
     let closed = probe.lid_closed_fast();
     let pressure = probe.thermal_pressure_fast();
     let state = load_guard_state(data_dir);
+    let now = now_epoch_secs();
     let (next, changed) = evaluate_guard_tick_with_thermal(
         closed,
         &pressure,
         settings.thermal_bright_cap_pct,
         &state,
-        now_epoch_secs(),
+        now,
         display,
     );
     if changed {
         save_guard_state(data_dir, &next)
             .map_err(|e| format!("failed to persist display-guard state: {e}"))?;
     }
-    Ok(Some(changed))
+    Ok(GuardTickOutcome {
+        paused: false,
+        changed,
+        fast_poll: guard_wants_fast_poll(&next, now),
+        open_restoring: guard_is_open_restoring(&next, now),
+    })
 }
 
 pub fn run_watch_once(data_dir: &Path) -> Result<(), String> {
     let probe = MacOsProbeBackend;
     let display = MacOsDisplayBackend;
-    let _ = run_guard_tick_locked(data_dir, &probe, &display)?;
+    let mut outcome = run_guard_tick_locked(data_dir, &probe, &display)?;
+    // When invoked on lid open (e.g. via LaunchAgent), follow through display wake and the
+    // short post-restore clobber watch within the same run instead of waiting another 10s.
+    for _ in 0..12 {
+        if !outcome.open_restoring {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(FAST_POLL_INTERVAL_MS));
+        outcome = run_guard_tick_locked(data_dir, &probe, &display)?;
+    }
     Ok(())
 }
 
@@ -522,9 +667,15 @@ pub fn run_watch_daemon(data_dir: &Path, interval_secs: u64) -> Result<(), Strin
         libc::signal(libc::SIGINT, handle_signal as *const () as usize);
         libc::signal(libc::SIGTERM, handle_signal as *const () as usize);
     }
-    let sleep_dur = Duration::from_secs(interval_secs.clamp(2, 300));
+    let probe = MacOsProbeBackend;
+    let display = MacOsDisplayBackend;
+    let normal_dur = Duration::from_secs(interval_secs.clamp(2, 300));
+    let fast_dur = Duration::from_millis(FAST_POLL_INTERVAL_MS);
     while !STOP_DAEMON.load(Ordering::Relaxed) {
-        let _ = run_watch_once(data_dir);
+        let fast = run_guard_tick_locked(data_dir, &probe, &display)
+            .map(|o| o.fast_poll)
+            .unwrap_or(false);
+        let sleep_dur = if fast { fast_dur } else { normal_dur };
         let steps = (sleep_dur.as_millis() / 250).max(1);
         for _ in 0..steps {
             if STOP_DAEMON.load(Ordering::Relaxed) {
@@ -547,6 +698,7 @@ mod tests {
         asleep: Mutex<bool>,
         brightness: Mutex<Option<f32>>,
         fail_set: Mutex<bool>,
+        drop_writes: Mutex<bool>,
         writes: Mutex<Vec<(u32, f32)>>,
         sleeps: Mutex<u32>,
         display_calls: Mutex<u32>,
@@ -560,6 +712,7 @@ mod tests {
                 asleep: Mutex::new(asleep),
                 brightness: Mutex::new(Some(brightness)),
                 fail_set: Mutex::new(false),
+                drop_writes: Mutex::new(false),
                 writes: Mutex::new(vec![]),
                 sleeps: Mutex::new(0),
                 display_calls: Mutex::new(0),
@@ -586,7 +739,9 @@ mod tests {
                 return false;
             }
             self.writes.lock().unwrap().push((id, level));
-            *self.brightness.lock().unwrap() = Some(level);
+            if !*self.drop_writes.lock().unwrap() {
+                *self.brightness.lock().unwrap() = Some(level);
+            }
             true
         }
         fn sleep_display_now(&self) -> bool {
@@ -600,10 +755,10 @@ mod tests {
     }
 
     #[test]
-    fn guard_fail_safe_fast_path_and_user_target_wake_restore() {
+    fn guard_fail_safe_open_sync_and_user_target_wake_restore() {
         let disp = MockDisplay::new(0.5, false);
 
-        // 1. Fail-safe on unknown lid (ioreg timeout)
+        // 1. Fail-safe on unknown lid (ioreg timeout) skips CoreGraphics completely
         let closed_st = GuardState {
             last_lid: "closed".into(),
             saved_brightness: 0.8,
@@ -618,15 +773,18 @@ mod tests {
         assert_eq!(s1, closed_st);
         assert_eq!(*disp.display_calls.lock().unwrap(), 0);
 
-        // 2. Steady-state open fast path skips CoreGraphics completely
+        // 2. Steady-state open syncs changed brightness once and skips disk writes when steady
         let open_st = GuardState::default();
-        let (_, changed) = evaluate_guard_tick(Some(false), &open_st, 200.0, &disp);
+        let (st_sync, changed) = evaluate_guard_tick(Some(false), &open_st, 200.0, &disp);
+        assert!(changed);
+        assert!((st_sync.saved_brightness - 0.5).abs() < 1e-6);
+        let (st_steady, changed) = evaluate_guard_tick(Some(false), &st_sync, 205.0, &disp);
         assert!(!changed);
-        assert_eq!(*disp.display_calls.lock().unwrap(), 0);
+        assert_eq!(st_steady, st_sync);
 
         // 3. Open + awake user brightness sets immediately & updates saved_brightness
         let (st_u1, changed, act1) =
-            apply_user_brightness(65.0, Some(false), &open_st, &disp).unwrap();
+            apply_user_brightness(65.0, Some(false), &st_steady, &disp).unwrap();
         assert!(changed);
         assert!(act1.applied);
         assert_eq!(act1.mode, "applied");
@@ -638,6 +796,7 @@ mod tests {
         assert!(changed);
         assert_eq!(st_c1.last_lid, "closed");
         assert_eq!(st_c1.saved_brightness, 0.65);
+        assert!(st_c1.needs_restore);
         assert_eq!(*disp.brightness.lock().unwrap(), Some(0.0));
         assert_eq!(*disp.sleeps.lock().unwrap(), 1);
 
@@ -672,6 +831,118 @@ mod tests {
         assert!(!st_r2.needs_restore);
         assert!(!st_r2.user_target);
         assert!((*disp.brightness.lock().unwrap()).unwrap() - 0.1 < 0.001);
+    }
+
+    #[test]
+    fn lid_open_waits_for_awake_restores_past_low_wake_and_guards_clobber() {
+        let disp = MockDisplay::new(0.78, false);
+        let open_st = GuardState::default();
+
+        // 1. Open -> Closed saves 0.78, dims to 0%, sleeps display
+        let (st_closed, changed) = evaluate_guard_tick(Some(true), &open_st, 100.0, &disp);
+        assert!(changed);
+        assert_eq!(st_closed.saved_brightness, 0.78);
+        assert!(st_closed.needs_restore);
+        assert!(*disp.asleep.lock().unwrap());
+        assert_eq!(*disp.brightness.lock().unwrap(), Some(0.0));
+        assert!(guard_wants_fast_poll(&st_closed, 100.0));
+
+        // 2. Lid opens while panel is STILL asleep for 5 ticks -> does NOT write or burn retries
+        disp.writes.lock().unwrap().clear();
+        let mut st = st_closed;
+        for i in 1..=5 {
+            let (next, _) = evaluate_guard_tick(Some(false), &st, 110.0 + i as f64, &disp);
+            assert_eq!(next.last_lid, "open");
+            assert!(next.needs_restore);
+            assert_eq!(next.restore_attempts, 0);
+            assert!(disp.writes.lock().unwrap().is_empty());
+            assert!(guard_is_open_restoring(&next, 110.0 + i as f64));
+            st = next;
+        }
+
+        // 3. Panel wakes at dim 6% (Auto-Brightness or single F2 tap), AND WindowServer silently
+        // drops the first write -> read-back catches it and retries without skipping via cur >= 0.02!
+        *disp.asleep.lock().unwrap() = false;
+        *disp.brightness.lock().unwrap() = Some(0.06);
+        *disp.drop_writes.lock().unwrap() = true;
+        let (st_drop, _) = evaluate_guard_tick(Some(false), &st, 116.0, &disp);
+        assert!(st_drop.needs_restore);
+        assert_eq!(st_drop.restore_attempts, 1);
+
+        // 4. Next tick write sticks -> restores full 0.78 and arms post-restore clobber watch
+        *disp.drop_writes.lock().unwrap() = false;
+        let (st_ok, changed) = evaluate_guard_tick(Some(false), &st_drop, 116.5, &disp);
+        assert!(changed);
+        assert!(!st_ok.needs_restore);
+        assert_eq!(st_ok.last_restore_ts, 116.5);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.78).abs() < 0.005);
+        assert!(guard_is_open_restoring(&st_ok, 118.0));
+
+        // 5. macOS loginwindow/CoreBrightness clobbers brightness back to 0% 2s later -> re-applied!
+        *disp.brightness.lock().unwrap() = Some(0.0);
+        let (st_guard, _) = evaluate_guard_tick(Some(false), &st_ok, 118.5, &disp);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.78).abs() < 0.005);
+        assert_eq!(st_guard.saved_brightness, 0.78);
+
+        // 6. User manually adjusts brightness to 50% during watch window -> NOT overridden!
+        *disp.brightness.lock().unwrap() = Some(0.50);
+        let (st_manual, _) = evaluate_guard_tick(Some(false), &st_guard, 120.0, &disp);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.50).abs() < 0.005);
+
+        // 7. After watch window expires (>6s), open tracking syncs the user's new 50% level
+        assert!(!guard_wants_fast_poll(&st_manual, 124.0));
+        let (st_synced, changed) = evaluate_guard_tick(Some(false), &st_manual, 124.0, &disp);
+        assert!(changed);
+        assert!((st_synced.saved_brightness - 0.50).abs() < 0.005);
+
+        // 8. If macOS already slept/zeroed display BEFORE our closed tick, saved 0.50 is preserved
+        // and still restored when the screen wakes black, OR macOS's own visible wake is preserved.
+        *disp.asleep.lock().unwrap() = true;
+        *disp.brightness.lock().unwrap() = Some(0.0);
+        let (st_pre_slept, _) = evaluate_guard_tick(Some(true), &st_synced, 140.0, &disp);
+        assert!((st_pre_slept.saved_brightness - 0.50).abs() < 0.005);
+        assert!(!st_pre_slept.needs_restore);
+
+        *disp.asleep.lock().unwrap() = false;
+        *disp.brightness.lock().unwrap() = Some(0.0);
+        let (st_black_wake, _) = evaluate_guard_tick(Some(false), &st_pre_slept, 150.0, &disp);
+        assert!(!st_black_wake.needs_restore);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.50).abs() < 0.005);
+
+        // 9. Explicit low user_target (1%) restores to 1% without arming post-restore watch
+        // (must never get bumped up to 20% on subsequent ticks).
+        let low_target_st = GuardState {
+            last_lid: "closed".into(),
+            saved_brightness: 0.01,
+            needs_restore: true,
+            user_target: true,
+            ..GuardState::default()
+        };
+        *disp.brightness.lock().unwrap() = Some(0.0);
+        let (st_low_ok, _) = evaluate_guard_tick(Some(false), &low_target_st, 200.0, &disp);
+        assert!(!st_low_ok.needs_restore);
+        assert_eq!(st_low_ok.last_restore_ts, 0.0);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.01).abs() < 0.002);
+        let (_, _) = evaluate_guard_tick(Some(false), &st_low_ok, 200.5, &disp);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.01).abs() < 0.002);
+
+        // 10. Dropped write at the 5% dark-room floor is caught by scaled read-back tolerance
+        let dark_floor_st = GuardState {
+            last_lid: "closed".into(),
+            saved_brightness: 0.05,
+            needs_restore: true,
+            user_target: false,
+            ..GuardState::default()
+        };
+        *disp.brightness.lock().unwrap() = Some(0.0);
+        *disp.drop_writes.lock().unwrap() = true;
+        let (st_floor_drop, _) = evaluate_guard_tick(Some(false), &dark_floor_st, 220.0, &disp);
+        assert!(st_floor_drop.needs_restore);
+        assert_eq!(st_floor_drop.restore_attempts, 1);
+        *disp.drop_writes.lock().unwrap() = false;
+        let (st_floor_ok, _) = evaluate_guard_tick(Some(false), &st_floor_drop, 220.5, &disp);
+        assert!(!st_floor_ok.needs_restore);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.05).abs() < 0.005);
     }
 
     #[test]
