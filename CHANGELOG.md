@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.2](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.1...v1.2.2) (2026-11-25)
+
+
+### Bug Fixes
+
+* **guard:** reliably restore prior brightness on lid open ([#12](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/12)) ([33619c4](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/33619c41f060d99bbce5dcaef41ab688da5bf228))
+
 ## [1.2.1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.0...v1.2.1) (2026-11-24)
 
 
