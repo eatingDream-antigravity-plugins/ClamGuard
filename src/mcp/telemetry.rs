@@ -343,9 +343,16 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     }
 
     /// Execute one lock-coordinated Display Guard tick using this engine's probe + display backends.
-    pub fn run_background_guard_tick(&self) {
-        if let Ok(Some(true)) = run_guard_tick_locked(&self.data_dir, &self.probe, &self.display) {
-            self.invalidate_cache();
+    /// Returns `true` when the guard loop should poll rapidly (closed lid or wake-restore active).
+    pub fn run_background_guard_tick(&self) -> bool {
+        match run_guard_tick_locked(&self.data_dir, &self.probe, &self.display) {
+            Ok(outcome) => {
+                if outcome.changed {
+                    self.invalidate_cache();
+                }
+                outcome.fast_poll
+            }
+            Err(_) => false,
         }
     }
 

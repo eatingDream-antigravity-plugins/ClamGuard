@@ -562,6 +562,154 @@ mod native {
             used_pct,
         }
     }
+
+    type IoServiceMatchingFn = unsafe extern "C" fn(name: *const libc::c_char) -> *mut libc::c_void;
+    type IoServiceGetMatchingServiceFn =
+        unsafe extern "C" fn(main_port: u32, matching: *mut libc::c_void) -> u32;
+    type IoRegistryEntryCreateCfPropertyFn = unsafe extern "C" fn(
+        entry: u32,
+        key: *const libc::c_void,
+        allocator: *const libc::c_void,
+        options: u32,
+    ) -> *const libc::c_void;
+    type IoObjectReleaseFn = unsafe extern "C" fn(object: u32) -> i32;
+    type CfStringCreateWithCStringFn = unsafe extern "C" fn(
+        alloc: *const libc::c_void,
+        c_str: *const libc::c_char,
+        encoding: u32,
+    ) -> *const libc::c_void;
+    type CfGetTypeIdFn = unsafe extern "C" fn(cf: *const libc::c_void) -> usize;
+    type CfBooleanGetTypeIdFn = unsafe extern "C" fn() -> usize;
+    type CfBooleanGetValueFn = unsafe extern "C" fn(boolean: *const libc::c_void) -> u8;
+    type CfReleaseFn = unsafe extern "C" fn(cf: *const libc::c_void);
+
+    struct IoKitApi {
+        service_matching: IoServiceMatchingFn,
+        get_matching_service: IoServiceGetMatchingServiceFn,
+        create_cf_property: IoRegistryEntryCreateCfPropertyFn,
+        object_release: IoObjectReleaseFn,
+        cf_get_type_id: CfGetTypeIdFn,
+        cf_boolean_type_id: CfBooleanGetTypeIdFn,
+        cf_boolean_get_value: CfBooleanGetValueFn,
+        cf_release: CfReleaseFn,
+        clamshell_key: *const libc::c_void,
+    }
+
+    // Immutable CFStringRef + loaded system framework function pointers are safe to share.
+    unsafe impl Send for IoKitApi {}
+    unsafe impl Sync for IoKitApi {}
+
+    unsafe fn load_sym(handle: *mut libc::c_void, name: &str) -> Option<*mut libc::c_void> {
+        let c = CString::new(name).ok()?;
+        let ptr = libc::dlsym(handle, c.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr)
+        }
+    }
+
+    fn iokit_api() -> Option<&'static IoKitApi> {
+        const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+        static API: OnceLock<Option<IoKitApi>> = OnceLock::new();
+        API.get_or_init(|| unsafe {
+            let iokit_path =
+                CString::new("/System/Library/Frameworks/IOKit.framework/IOKit").ok()?;
+            let cf_path = CString::new(
+                "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+            )
+            .ok()?;
+            let iokit = libc::dlopen(iokit_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            let cf = libc::dlopen(cf_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+            if iokit.is_null() || cf.is_null() {
+                return None;
+            }
+            let service_matching = std::mem::transmute::<*mut libc::c_void, IoServiceMatchingFn>(
+                load_sym(iokit, "IOServiceMatching")?,
+            );
+            let get_matching_service = std::mem::transmute::<
+                *mut libc::c_void,
+                IoServiceGetMatchingServiceFn,
+            >(load_sym(iokit, "IOServiceGetMatchingService")?);
+            let create_cf_property = std::mem::transmute::<
+                *mut libc::c_void,
+                IoRegistryEntryCreateCfPropertyFn,
+            >(load_sym(iokit, "IORegistryEntryCreateCFProperty")?);
+            let object_release = std::mem::transmute::<*mut libc::c_void, IoObjectReleaseFn>(
+                load_sym(iokit, "IOObjectRelease")?,
+            );
+            let cf_str_create = std::mem::transmute::<
+                *mut libc::c_void,
+                CfStringCreateWithCStringFn,
+            >(load_sym(cf, "CFStringCreateWithCString")?);
+            let cf_get_type_id = std::mem::transmute::<*mut libc::c_void, CfGetTypeIdFn>(
+                load_sym(cf, "CFGetTypeID")?,
+            );
+            let cf_boolean_type_id =
+                std::mem::transmute::<*mut libc::c_void, CfBooleanGetTypeIdFn>(load_sym(
+                    cf,
+                    "CFBooleanGetTypeID",
+                )?);
+            let cf_boolean_get_value =
+                std::mem::transmute::<*mut libc::c_void, CfBooleanGetValueFn>(load_sym(
+                    cf,
+                    "CFBooleanGetValue",
+                )?);
+            let cf_release = std::mem::transmute::<*mut libc::c_void, CfReleaseFn>(load_sym(
+                cf,
+                "CFRelease",
+            )?);
+            let key_c = CString::new("AppleClamshellState").ok()?;
+            let clamshell_key = cf_str_create(std::ptr::null(), key_c.as_ptr(), K_CF_STRING_ENCODING_UTF8);
+            if clamshell_key.is_null() {
+                return None;
+            }
+            Some(IoKitApi {
+                service_matching,
+                get_matching_service,
+                create_cf_property,
+                object_release,
+                cf_get_type_id,
+                cf_boolean_type_id,
+                cf_boolean_get_value,
+                cf_release,
+                clamshell_key,
+            })
+        })
+        .as_ref()
+    }
+
+    /// Native sub-millisecond `AppleClamshellState` read via IOKit (`IOPMrootDomain`).
+    /// Returns `Some(Some(closed))` on MacBooks, `Some(None)` on desktop Macs without a lid sensor,
+    /// or `None` if IOKit FFI could not be queried (caller falls back to `/usr/sbin/ioreg`).
+    pub fn lid_closed_iokit() -> Option<Option<bool>> {
+        const DOMAIN: &[u8] = b"IOPMrootDomain\0";
+        let api = iokit_api()?;
+        unsafe {
+            let matching = (api.service_matching)(DOMAIN.as_ptr() as *const libc::c_char);
+            if matching.is_null() {
+                return None;
+            }
+            // `IOServiceGetMatchingService` consumes one reference to `matching`.
+            let service = (api.get_matching_service)(0, matching);
+            if service == 0 {
+                return None;
+            }
+            let prop =
+                (api.create_cf_property)(service, api.clamshell_key, std::ptr::null(), 0);
+            let _ = (api.object_release)(service);
+            if prop.is_null() {
+                return Some(None);
+            }
+            let val = if (api.cf_get_type_id)(prop) == (api.cf_boolean_type_id)() {
+                Some((api.cf_boolean_get_value)(prop) != 0)
+            } else {
+                None
+            };
+            (api.cf_release)(prop);
+            Some(val)
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -640,6 +788,9 @@ impl ProbeBackend for MacOsProbeBackend {
         }
         #[cfg(target_os = "macos")]
         {
+            if let Some(res) = native::lid_closed_iokit() {
+                return res;
+            }
             let (ok, out) = run_cmd_timeout(
                 "/usr/sbin/ioreg",
                 &["-r", "-c", "IOPMrootDomain", "-d", "1", "-w", "0"],
@@ -879,6 +1030,26 @@ mod tests {
                 matches!(lvl, Some("nominal" | "fair" | "serious" | "critical")),
                 "expected Darwin com.apple.system.thermalpressurelevel, got {lvl:?}"
             );
+            // Verify native IOKit AppleClamshellState FFI matches `ioreg` cleanly (MacBooks & desktop Macs).
+            let iokit_lid = native::lid_closed_iokit();
+            assert!(
+                iokit_lid.is_some(),
+                "expected native IOKit IOPMrootDomain query to succeed"
+            );
+            let (ok, out) = run_cmd_timeout(
+                "/usr/sbin/ioreg",
+                &["-r", "-c", "IOPMrootDomain", "-d", "1", "-w", "0"],
+                CMD_TIMEOUT_MS,
+            );
+            if ok {
+                let (lid_str, _) = parse_ioreg_clamshell(&out);
+                let expected = match lid_str.as_str() {
+                    "closed" => Some(true),
+                    "open" => Some(false),
+                    _ => None,
+                };
+                assert_eq!(iokit_lid.unwrap(), expected);
+            }
         }
 
         let pm = " displaysleep 0\n lowpowermode 1\n";
