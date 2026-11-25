@@ -111,10 +111,13 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
         std::thread::Builder::new()
             .name("clamshell-guard".into())
             .spawn(move || {
-                let dur = Duration::from_millis(guard_interval_ms);
+                let normal_dur = Duration::from_millis(guard_interval_ms);
+                let fast_dur = Duration::from_millis(
+                    guard_interval_ms.min(crate::guard::FAST_POLL_INTERVAL_MS),
+                );
                 while !stop.load(Ordering::SeqCst) {
-                    e.run_background_guard_tick();
-                    e.wait_guard_interval(dur, &stop);
+                    let fast = e.run_background_guard_tick();
+                    e.wait_guard_interval(if fast { fast_dur } else { normal_dur }, &stop);
                 }
             })
             .ok()

@@ -234,6 +234,12 @@ pub struct GuardState {
     pub thermal_capped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_thermal_brightness: Option<f64>,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub last_restore_ts: f64,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 fn default_last_lid() -> String {
@@ -255,6 +261,7 @@ impl Default for GuardState {
             user_target: false,
             thermal_capped: false,
             pre_thermal_brightness: None,
+            last_restore_ts: 0.0,
         }
     }
 }
