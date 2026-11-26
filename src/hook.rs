@@ -2,7 +2,7 @@ use crate::i18n::{detect_lang, Lang};
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::policy::{
     compute_policy, format_lid, format_power, format_profile, format_thermal,
-    format_topology_compact, state_signature,
+    format_topology_compact, policy_settings_signature, state_signature,
 };
 use crate::state::{atomic_write, ensure_private_dir, read_settings, settings_path, sha256_hex_16};
 use serde_json::{json, Value};
@@ -163,19 +163,34 @@ pub fn evaluate_hook<P: ProbeBackend>(
     let state_file = state_dir.join(format!("{safe_id}.state"));
     let settings_file = settings_path(data_dir);
 
-    let prev_sig = fs::read_to_string(&state_file)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let state_raw = fs::read_to_string(&state_file).unwrap_or_default();
+    let mut state_lines = state_raw.lines();
+    let prev_sig = state_lines.next().unwrap_or("").trim().to_string();
+    let prev_policy_settings_sig = state_lines
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
+    let mut preloaded_settings = None;
     if event_name == "PreInvocation" && !prev_sig.is_empty() {
         let state_mt = mtime_secs(&state_file).unwrap_or(0);
-        let settings_newer = mtime_secs(&settings_file)
-            .map(|smt| smt >= state_mt)
-            .unwrap_or(false);
         let age = now_secs.saturating_sub(state_mt);
-        if !settings_newer && age < ttl_secs {
-            return json!({});
+        if age < ttl_secs {
+            let settings_newer = mtime_secs(&settings_file)
+                .map(|smt| smt >= state_mt)
+                .unwrap_or(false);
+            if !settings_newer {
+                return json!({});
+            }
+            // Only policy-relevant settings (modeOverride, maxJobsOverride, acClosedProfile)
+            // invalidate the PreInvocation TTL; toggling UI lang or guardEnabled must not bust it.
+            let settings = read_settings(data_dir);
+            let cur_policy_sig = policy_settings_signature(&settings);
+            if prev_policy_settings_sig.as_deref() == Some(cur_policy_sig.as_str()) {
+                return json!({});
+            }
+            preloaded_settings = Some(settings);
         }
     }
 
@@ -185,7 +200,8 @@ pub fn evaluate_hook<P: ProbeBackend>(
 
     let host = probe.static_host();
     let hw = probe.probe_hardware();
-    let settings = read_settings(data_dir);
+    let settings = preloaded_settings.unwrap_or_else(|| read_settings(data_dir));
+    let cur_policy_sig = policy_settings_signature(&settings);
     let lang = detect_lang(Some(&settings));
     let policy = compute_policy(
         &hw.lid_state,
@@ -197,7 +213,7 @@ pub fn evaluate_hook<P: ProbeBackend>(
     );
 
     let sig = state_signature(&hw.lid_state, &hw.power_source, &hw.thermal_state, &policy);
-    let _ = atomic_write(&state_file, format!("{sig}\n").as_bytes());
+    let _ = atomic_write(&state_file, format!("{sig}\n{cur_policy_sig}\n").as_bytes());
 
     if sig == prev_sig {
         return json!({});
@@ -347,10 +363,22 @@ mod tests {
     use crate::policy::CpuTopology;
     use crate::state::{write_settings, SettingsPatch};
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct StubProbe {
         lid: String,
         power: String,
+        calls: AtomicUsize,
+    }
+
+    impl StubProbe {
+        fn new(lid: &str, power: &str) -> Self {
+            Self {
+                lid: lid.into(),
+                power: power.into(),
+                calls: AtomicUsize::new(0),
+            }
+        }
     }
 
     impl ProbeBackend for StubProbe {
@@ -370,6 +398,7 @@ mod tests {
             Some(self.lid == "closed")
         }
         fn probe_hardware(&self) -> HardwareProbe {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             HardwareProbe {
                 lid_state: self.lid.clone(),
                 clamshell_causes_sleep: "no".into(),
@@ -422,10 +451,7 @@ mod tests {
         )
         .unwrap();
 
-        let closed = StubProbe {
-            lid: "closed".into(),
-            power: "battery".into(),
-        };
+        let closed = StubProbe::new("closed", "battery");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -444,6 +470,7 @@ mod tests {
             60,
             now,
         );
+        assert_eq!(closed.calls.load(Ordering::SeqCst), 1);
         assert_eq!(r1["injectSteps"].as_array().unwrap().len(), 1);
         assert!(r1.get("terminationBehavior").is_none());
         let sys1 = r1["injectSteps"][0]["systemMessage"]["systemMessage"]
@@ -456,7 +483,7 @@ mod tests {
         assert!(!sys1.contains("CPU_Speed_Limit="));
         assert!(md1.contains("Lid closed"));
 
-        // 2. Immediate PreInvocation within TTL hits cache -> {}
+        // 2. Immediate PreInvocation within TTL hits cache -> {} (0 extra probes)
         let r2 = evaluate_hook(
             Some("pre-invocation"),
             HookInput {
@@ -470,8 +497,36 @@ mod tests {
             now,
         );
         assert_eq!(r2, json!({}));
+        assert_eq!(closed.calls.load(Ordering::SeqCst), 1);
 
-        // 3. Same-second settings update to zh-CN + strict bypasses TTL and emits Chinese user_markdown
+        // 2b. Toggling non-policy settings (lang / guardEnabled / thermalBrightCapPct) MUST NOT
+        // bust the PreInvocation TTL or trigger a hardware probe!
+        write_settings(
+            &dir,
+            &SettingsPatch {
+                lang: Some("zh-CN".into()),
+                guard_enabled: Some(false),
+                thermal_bright_cap_pct: Some(50),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        let r2b = evaluate_hook(
+            Some("pre-invocation"),
+            HookInput {
+                conversation_id: "c1".into(),
+                hook_event_name: "PreInvocation".into(),
+            },
+            &dir,
+            "mac-clamshell-mcp",
+            &closed,
+            60,
+            now,
+        );
+        assert_eq!(r2b, json!({}));
+        assert_eq!(closed.calls.load(Ordering::SeqCst), 1);
+
+        // 3. Same-second policy settings update to strict bypasses TTL and emits Chinese user_markdown
         write_settings(
             &dir,
             &SettingsPatch {
@@ -494,6 +549,7 @@ mod tests {
             60,
             now,
         );
+        assert_eq!(closed.calls.load(Ordering::SeqCst), 2);
         assert_eq!(r3["terminationBehavior"], "");
         assert!(r3["injectSteps"][0]["systemMessage"]["systemMessage"]
             .as_str()
@@ -505,10 +561,7 @@ mod tests {
             .contains("强限保护模式"));
 
         // 4. Fresh SessionStart under normal emits {}
-        let open = StubProbe {
-            lid: "open".into(),
-            power: "ac".into(),
-        };
+        let open = StubProbe::new("open", "ac");
         write_settings(
             &dir,
             &SettingsPatch {

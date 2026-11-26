@@ -74,6 +74,21 @@ pub fn lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join("display-guard.lock")
 }
 
+pub fn daemon_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("display-guard-daemon.lock")
+}
+
+pub fn file_fingerprint(path: &Path) -> Option<(u128, u64)> {
+    let meta = fs::metadata(path).ok()?;
+    let mtime_ns = meta
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((mtime_ns, meta.len()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -216,20 +231,38 @@ pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Sett
     Ok(next)
 }
 
+/// Explicit user brightness intent (owned by user brightness controls / DP5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GuardState {
-    #[serde(default = "default_last_lid")]
-    pub last_lid: String,
+pub struct UserBrightnessIntent {
     #[serde(default = "default_saved_brightness")]
     pub saved_brightness: f64,
+    #[serde(default)]
+    pub user_target: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub user_override_thermal: bool,
+}
+
+impl Default for UserBrightnessIntent {
+    fn default() -> Self {
+        Self {
+            saved_brightness: default_saved_brightness(),
+            user_target: false,
+            user_override_thermal: false,
+        }
+    }
+}
+
+/// Internal Display Guard state machine (owned by guard daemon / DP4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuardMachineState {
+    #[serde(default = "default_last_lid")]
+    pub last_lid: String,
     #[serde(default)]
     pub last_sleep_ts: f64,
     #[serde(default)]
     pub needs_restore: bool,
     #[serde(default)]
     pub restore_attempts: u32,
-    #[serde(default)]
-    pub user_target: bool,
     #[serde(default)]
     pub thermal_capped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,8 +271,36 @@ pub struct GuardState {
     pub last_restore_ts: f64,
 }
 
+impl Default for GuardMachineState {
+    fn default() -> Self {
+        Self {
+            last_lid: default_last_lid(),
+            last_sleep_ts: 0.0,
+            needs_restore: false,
+            restore_attempts: 0,
+            thermal_capped: false,
+            pre_thermal_brightness: None,
+            last_restore_ts: 0.0,
+        }
+    }
+}
+
+/// Persisted display-guard-state.json combining user intent and guard machine state
+/// with flat on-disk JSON compatibility.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GuardState {
+    #[serde(flatten)]
+    pub user_intent: UserBrightnessIntent,
+    #[serde(flatten)]
+    pub machine: GuardMachineState,
+}
+
 fn is_zero_f64(v: &f64) -> bool {
     *v == 0.0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn default_last_lid() -> String {
@@ -248,22 +309,6 @@ fn default_last_lid() -> String {
 
 fn default_saved_brightness() -> f64 {
     0.20
-}
-
-impl Default for GuardState {
-    fn default() -> Self {
-        Self {
-            last_lid: default_last_lid(),
-            saved_brightness: default_saved_brightness(),
-            last_sleep_ts: 0.0,
-            needs_restore: false,
-            restore_attempts: 0,
-            user_target: false,
-            thermal_capped: false,
-            pre_thermal_brightness: None,
-            last_restore_ts: 0.0,
-        }
-    }
 }
 
 pub fn load_guard_state(data_dir: &Path) -> GuardState {
@@ -343,6 +388,52 @@ impl FileLock {
 }
 
 impl Drop for FileLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// Exclusive non-blocking daemon ownership lock (`display-guard-daemon.lock`) so only one
+/// long-lived guard loop (standalone `watch --daemon` or fallback `serve` observer) runs at a time.
+pub struct DaemonLock {
+    file: File,
+}
+
+impl DaemonLock {
+    pub fn try_acquire(data_dir: &Path) -> io::Result<Option<Self>> {
+        ensure_private_dir(data_dir)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(daemon_lock_path(data_dir))?;
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            Ok(Some(Self { file }))
+        } else {
+            let err = io::Error::last_os_error();
+            if err.kind() == io::ErrorKind::WouldBlock {
+                Ok(None)
+            } else {
+                Err(err)
+            }
+        }
+    }
+
+    pub fn is_active(data_dir: &Path) -> bool {
+        let path = daemon_lock_path(data_dir);
+        if !path.exists() {
+            return false;
+        }
+        matches!(Self::try_acquire(data_dir), Ok(None))
+    }
+}
+
+impl Drop for DaemonLock {
     fn drop(&mut self) {
         unsafe {
             libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
@@ -558,6 +649,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s3.lang, None);
+
+        // GuardState flat JSON compatibility across separated user_intent / machine structs
+        let legacy = r#"{"last_lid":"closed","saved_brightness":0.72,"last_sleep_ts":10.0,"needs_restore":true,"restore_attempts":2,"user_target":true,"thermal_capped":true,"pre_thermal_brightness":0.85}"#;
+        let parsed: GuardState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.machine.last_lid, "closed");
+        assert_eq!(parsed.user_intent.saved_brightness, 0.72);
+        assert!(parsed.user_intent.user_target);
+        assert!(!parsed.user_intent.user_override_thermal);
+        assert!(parsed.machine.thermal_capped);
+        assert_eq!(parsed.machine.pre_thermal_brightness, Some(0.85));
+        let reserialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(reserialized["last_lid"], "closed");
+        assert_eq!(reserialized["saved_brightness"], 0.72);
+
+        // DaemonLock enforces exclusive guard daemon ownership and accurate observer detection
+        assert!(!DaemonLock::is_active(&dir));
+        let dlock = DaemonLock::try_acquire(&dir).unwrap().unwrap();
+        assert!(DaemonLock::is_active(&dir));
+        assert!(DaemonLock::try_acquire(&dir).unwrap().is_none());
+        drop(dlock);
+        assert!(!DaemonLock::is_active(&dir));
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

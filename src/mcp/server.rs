@@ -89,39 +89,60 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
         .unwrap_or_else(|| "mac-clamshell-mcp".to_string());
 
     let engine = Arc::new(TelemetryEngine::new(
-        data_dir,
+        data_dir.clone(),
         binary_path,
         MacOsProbeBackend,
         MacOsDisplayBackend,
     ));
-    engine.set_bg_guard_active(true);
     let html_loader = Arc::new(HtmlLoader::new(panel_html_override));
 
-    // Spawn lightweight lock-coordinated Display Guard loop so closed-lid backlight protection,
-    // wake-restore, and optional thermal brightness cap work out-of-the-box whenever Antigravity is open.
+    // Decouple MCP server lifecycle from the standalone Display Guard daemon:
+    // if LaunchAgent or a standalone `watch --daemon` already owns the guard, run in pure
+    // observer mode (watching `display-guard-state.json` fingerprints) instead of contending
+    // in a competing `LOCK_NB` loop. Only spawn a fallback guard thread if we exclusively
+    // acquire `DaemonLock`.
     let stop_guard = Arc::new(AtomicBool::new(false));
     let guard_interval_ms = std::env::var("MAC_CLAMSHELL_GUARD_INTERVAL_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_SERVE_GUARD_INTERVAL_MS)
         .clamp(100, 300_000);
-    let guard_handle = {
+    let fallback_daemon_lock = if crate::guard::is_external_guard_active(&data_dir) {
+        None
+    } else {
+        crate::state::DaemonLock::try_acquire(&data_dir).ok().flatten()
+    };
+    let guard_handle = if let Some(daemon_lock) = fallback_daemon_lock {
         let e = Arc::clone(&engine);
         let stop = Arc::clone(&stop_guard);
+        let guard_data_dir = data_dir;
         std::thread::Builder::new()
             .name("clamshell-guard".into())
             .spawn(move || {
+                let _lock = daemon_lock;
+                let probe = MacOsProbeBackend;
+                let display = MacOsDisplayBackend;
                 let normal_dur = Duration::from_millis(guard_interval_ms);
                 let fast_dur = Duration::from_millis(
                     guard_interval_ms.min(crate::guard::FAST_POLL_INTERVAL_MS),
                 );
                 while !stop.load(Ordering::SeqCst) {
-                    let fast = e.run_background_guard_tick();
+                    if crate::launchagent::is_launchagent_active() {
+                        // Yield cleanly if LaunchAgent was installed while MCP server was running.
+                        e.wait_guard_interval(normal_dur, &stop);
+                        continue;
+                    }
+                    let fast = crate::guard::run_guard_tick_locked(&guard_data_dir, &probe, &display)
+                        .map(|o| o.fast_poll)
+                        .unwrap_or(false);
                     e.wait_guard_interval(if fast { fast_dur } else { normal_dur }, &stop);
                 }
             })
             .ok()
+    } else {
+        None
     };
+    engine.set_bg_guard_active(guard_handle.is_some());
 
     // Pre-warm HTML template and initial telemetry asynchronously so first open is <0.5ms.
     {
@@ -348,6 +369,9 @@ mod tests {
             &html_loader,
         )
         .unwrap();
+        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["normal"], 8);
+        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["utility"], 2);
+        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["strict"], 1);
         let hash = panel["result"]["structuredContent"]["hash"]
             .as_str()
             .unwrap()
@@ -435,8 +459,18 @@ mod tests {
         );
 
         // Desktop Mac (open/unknown lid + no built-in display) returns explicit isError: true
+        // and honors persisted settings.lang via engine.detect_lang() across all tool error paths.
+        let desktop_dir = dir.join("desktop");
+        crate::state::write_settings(
+            &desktop_dir,
+            &crate::state::SettingsPatch {
+                lang: Some("zh-CN".into()),
+                ..crate::state::SettingsPatch::default()
+            },
+        )
+        .unwrap();
         let desktop_engine = Arc::new(TelemetryEngine::new(
-            dir.join("desktop"),
+            desktop_dir,
             "mac-clamshell-mcp".into(),
             TestProbe { lid_closed: false },
             TestDisplay {
@@ -451,6 +485,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(desktop_err["result"]["isError"], true);
+        assert!(desktop_err["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("亮度调节失败"));
+
+        let missing_pct_err = handle_rpc_value(
+            &json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{}}}),
+            &desktop_engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert_eq!(missing_pct_err["result"]["isError"], true);
+        assert!(missing_pct_err["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("percent 必须是"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -450,6 +450,7 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
             const e = mkEl(id);
             if (id === "auto-chip" || id === "guard-btn") e.lastElementChild = mkEl(`${id}-lbl`);
             if (id === "lock-btn") e.setAttribute("data-a", "lock");
+            if (id === "guard-btn") e.setAttribute("data-a", "guard");
           }
         }
       },
@@ -463,6 +464,7 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     const timers = [];
     let tid = 1;
     const rpcCalls = [];
+    const configureHandlers = [];
     let nextPollPayload = { unchanged: true, hash: "h1", timestamp: "2026-01-01T00:00:05Z", serverMs: 2 };
     let roDisconnected = false;
     let ioDisconnected = false;
@@ -478,6 +480,11 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
           );
         } else if (msg.method === "tools/call") {
           rpcCalls.push(msg.params);
+          if (msg.params.name === "clamshell_configure" && configureHandlers.length > 0) {
+            const handler = configureHandlers.shift();
+            handler(msg.id, msg.params.arguments);
+            return;
+          }
           let structuredContent = nextPollPayload;
           if (msg.params.name === "clamshell_lock_screen") {
             structuredContent = { ok: true, method: "SACLockScreenImmediate", locked_at_ms: 1700000000000, serverMs: 1 };
@@ -624,6 +631,52 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.deepEqual({ ...rpcCalls[rpcCalls.length - 1].arguments }, {});
     assert.ok(byId.get("fb").innerHTML.includes("✓ Locked"));
 
+    // 4b. flushQueue transient error with concurrent pendingPatch preserves failed fields and flushes cleanly
+    let failFirstCfg = null;
+    configureHandlers.push((id) => {
+      failFirstCfg = () =>
+        emitWin("message", {
+          source: fakeParent,
+          data: { jsonrpc: "2.0", id, result: { isError: true, content: [{ type: "text", text: "transient" }] } },
+        });
+    });
+    configureHandlers.push((id, args) => {
+      setImmediate(() =>
+        emitWin("message", {
+          source: fakeParent,
+          data: {
+            jsonrpc: "2.0",
+            id,
+            result: {
+              content: [{ type: "text", text: "ok" }],
+              structuredContent: {
+                ...boot,
+                settings: { ...boot.settings, ...args },
+                policy: { ...boot.policy, profile: args.modeOverride || "normal", modeSource: "manual", maxJobs: 2 },
+                guardStatus: args.guardEnabled === false ? "paused" : "armed",
+                hash: "h3",
+                serverMs: 2,
+              },
+            },
+          },
+        })
+      );
+    });
+    const ecoBtn = mkEl("m-eco", { "data-m": "eco" });
+    const guardBtn = byId.get("guard-btn");
+    appRoot.dispatch("click", { target: { closest: () => ecoBtn } });
+    // Queue second patch while first clamshell_configure RPC is in flight
+    appRoot.dispatch("click", { target: { closest: () => guardBtn } });
+    assert.ok(failFirstCfg, "expected first configure RPC in flight");
+    failFirstCfg();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    const cfgCalls = rpcCalls.filter((c) => c.name === "clamshell_configure");
+    assert.equal(cfgCalls.length, 2, "concurrent pendingPatch must NOT be dropped after transient error");
+    assert.deepEqual({ ...cfgCalls[1].arguments }, { modeOverride: "eco", guardEnabled: false });
+    assert.ok(byId.get("fb").innerHTML.includes("✓ Saved"), "isSyncing must clear after retry flush succeeds");
+
     // 5. Teardown cleanly disconnects observers
     emitWin("message", {
       source: fakeParent,
@@ -650,10 +703,13 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
 
     const base = {
       lidState: "open",
-      cpuTopology: { total: 10 },
+      powerSource: "ac",
+      thermalState: "ok",
+      cpuTopology: { total: 10, performanceCores: 6, efficiencyCores: 4 },
       policy: { profile: "normal", autoProfile: "normal", maxJobs: 10 },
+      profileJobs: { normal: 10, utility: 4, eco: 2, strict: 1, autoEco: 1 },
       guardStatus: "armed",
-      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true },
+      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
       envVars: { CARGO_BUILD_JOBS: "4" },
     };
     const paused = computeOptimisticState(base, { guardEnabled: false, modeOverride: "eco", maxJobsOverride: 3 });
@@ -661,5 +717,18 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(paused.policy.profile, "eco");
     assert.equal(paused.policy.modeSource, "manual");
     assert.equal(paused.policy.maxJobs, 3);
+
+    // Exact table lookup from Rust-emitted profileJobs (no duplicated policy math)
+    const utilManual = computeOptimisticState(base, { modeOverride: "utility" });
+    assert.equal(utilManual.policy.maxJobs, 4);
+    const ecoManual = computeOptimisticState(base, { modeOverride: "eco" });
+    assert.equal(ecoManual.policy.maxJobs, 2);
+    const closedAc = computeOptimisticState(
+      { ...base, lidState: "closed", policy: { profile: "utility", autoProfile: "utility", maxJobs: 4 } },
+      { acClosedProfile: "eco" }
+    );
+    assert.equal(closedAc.policy.autoProfile, "eco");
+    assert.equal(closedAc.policy.profile, "eco");
+    assert.equal(closedAc.policy.maxJobs, 1, "auto eco uses profileJobs.autoEco exact lookup");
   });
 });
