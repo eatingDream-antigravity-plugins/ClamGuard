@@ -1,0 +1,47 @@
+# Mac Clamshell MCP
+
+> Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, and display thermal guard that turns off the built-in screen when closed, throttles heavy builds/tests based on lid/power/thermal state, adjusts brightness, and locks the screen without sleeping background jobs.
+
+## For AI Agents
+
+- [Agent Skill](skills/mac-clamshell/SKILL.md): Throttling rules (`utility` / `eco` / `strict`), `mac-clamshell-mcp run` wrapping guidance, and MCP tool usage (`agentskills.io` compatible).
+- [Contributor & Agent Guide](AGENTS.md): Architecture, Cargo/panel test commands, security invariants, and plugin packaging rules.
+- [README (English)](README.md) | [README (简体中文)](README.zh-CN.md)
+
+## Quick Connect (Any MCP Client or Shell Agent)
+
+Install the prebuilt macOS binary (Apple Silicon & Intel):
+```sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
+```
+
+Generic stdio MCP configuration (`mcpServers`):
+```json
+{
+  "mcpServers": {
+    "mac-clamshell-mcp": {
+      "command": "~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp",
+      "args": [
+        "serve",
+        "--data-dir", "~/.gemini/antigravity/plugin_data/mac-clamshell-mcp",
+        "--panel-html", "~/.gemini/config/plugins/mac-clamshell-mcp/panel/dist/panel.html"
+      ]
+    }
+  }
+}
+```
+
+## Public MCP Tools
+
+- `clamshell_panel`: Opens the live dashboard and reports lid, power, thermal, display guard, and active throttle tier.
+- `clamshell_set_brightness`: Sets built-in display brightness (`0`–`100%`) immediately when open, or updates wake-restore level while closed without lighting the screen.
+- `clamshell_lock_screen`: Locks the screen immediately without sleeping background jobs (call only when explicitly requested).
+
+## CLI Subcommands
+
+- `mac-clamshell-mcp status [--json]`
+- `mac-clamshell-mcp run [--mode <auto|normal|utility|eco|strict>] [--jobs <n>] -- <cmd> [args...]`
+- `mac-clamshell-mcp run --sh "<shell command>"`
+- `mac-clamshell-mcp brightness get | set <0..100>`
+- `mac-clamshell-mcp lock`
+- `mac-clamshell-mcp guard install | uninstall | status | watch`

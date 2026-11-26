@@ -109,7 +109,7 @@ jobs:
             cp plugin/mcp_config.json "$STAGE/mcp_config.json"
             cp plugin/hooks.json "$STAGE/hooks.json"
             cp plugin/rules/AGENTS.md "$STAGE/rules/AGENTS.md"
-            cp plugin/skills/mac-clamshell/SKILL.md "$STAGE/skills/mac-clamshell/SKILL.md"
+            cp skills/mac-clamshell/SKILL.md "$STAGE/skills/mac-clamshell/SKILL.md"
             cp assets/logo.svg "$STAGE/assets/logo.svg"
             cp LICENSE "$STAGE/LICENSE"
             cp README.md "$STAGE/README.md"
