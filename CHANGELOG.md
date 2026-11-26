@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.3...v1.3.0) (2026-11-26)
+
+
+### Features
+
+* **ai:** promote root Agent Skill, add llms.txt, AGENTS.md, and AI integration docs ([#16](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/16)) ([ccb6cfa](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/ccb6cfafd87921de01d999b693c7c31bd6ca9da6))
+
 ## [1.2.3](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.2...v1.2.3) (2026-11-26)
 
 
