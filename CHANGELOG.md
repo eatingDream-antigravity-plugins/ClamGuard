@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.2](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.4.1...v1.4.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* align display branding and panel wordmark to ClamGuard ([#23](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/23)) ([1117957](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/1117957db388fdedce6ea28b9d38906ae3bf4231))
+
 ## [1.4.1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.4.0...v1.4.1) (2026-11-26)
 
 
