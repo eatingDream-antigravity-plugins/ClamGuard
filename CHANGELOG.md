@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.1](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.4.0...v1.4.1) (2026-11-26)
+
+
+### Bug Fixes
+
+* harden sanitization, CI token scope, test guards, flock probe, and MCP protocol ([#20](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/20)) ([e3de123](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/e3de123c89be2c504a0a57fe54b965860043ac1b))
+
 ## [1.4.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.3.0...v1.4.0) (2026-11-26)
 
 
