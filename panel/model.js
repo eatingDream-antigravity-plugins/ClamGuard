@@ -56,13 +56,13 @@ export function describeFanState(fan, lang = "en", guardPaused = false) {
   }
   const rpmText = st === "ok" && fs.length === 2 ? b(`L ${rpm(fs[0].rpm)} · R ${rpm(fs[1].rpm)} rpm`, `左 ${rpm(fs[0].rpm)} · 右 ${rpm(fs[1].rpm)} rpm`)
     : st === "ok" && fs.length ? `${fs.map((f) => rpm(f.rpm)).join(" · ")} rpm` : b("Unavailable", "传感器不可读");
-  const ro = b("Read-only", "只读"), sep = b(", ", "、");
+  const ro = b("Read-only", "只读"), sep = b(", ", "、"), dot = b(".", "");
   const smL = sm === "manual" ? b("manual", "手动") : sm === "auto" ? b("auto", "自动") : b("unknown", "未知");
   const caption = st === "unavailable" ? b("Sensor unavailable; ", "风扇不可读；") + gTail
-    : ex.length ? `${ro} · SMC ${smL} · ${ex.join(sep)}.`
-    : sm === "manual" ? `${ro} · SMC ${smL}.`
-    : mon.length ? `${ro} · SMC ${smL} · ${b("monitor", "监测")}: ${mon.join(sep)}.`
-    : sm === "unknown" ? `${ro} · SMC ${smL}.`
+    : ex.length ? `${ro} · SMC ${smL} · ${ex.join(sep)}${dot}`
+    : sm === "manual" ? `${ro} · SMC ${smL}${dot}`
+    : mon.length ? `${ro} · SMC ${smL} · ${b("monitor", "监测")}: ${mon.join(sep)}${dot}`
+    : sm === "unknown" ? `${ro} · SMC ${smL}${dot}`
     : b(`${ro} — macOS auto fans.`, `${ro} · macOS 自动风扇。`);
   return {
     status: st, rpmText, showController: true, controller,

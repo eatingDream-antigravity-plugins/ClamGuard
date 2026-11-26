@@ -9,13 +9,13 @@ svg{fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-l
 [data-k=ok]{--c:var(--ok)}[data-k=wn]{--c:var(--wn)}[data-k=er],[data-k=err]{--c:var(--er)}[data-k=in]{--c:var(--in)}[data-k=ac],[data-k=sync]{--c:var(--ac)}[data-k=t3]{--c:var(--t3)}
 .c,.hg>div{display:flex;flex-direction:column}.r,.bn{display:flex;align-items:center;justify-content:space-between}.f,.hd,.hc,.hv,.bs,.ba,.pt{display:flex;align-items:center}
 .em,.fb,.ch,.bg,.et,.lg,.ib,.bt,.bs2,.ss{display:inline-flex;align-items:center}.em,.ib,.bt,.bs2{justify-content:center}
-.em,.dt,.wm,.hc,.fd,.rb,.cd,.lg,.ib,.bt,.ba,.bg,.sw,.fg,.ci,.hv>span:first-child{flex-shrink:0}
+.em,.dt,.wm,.hc,.fb,.fd,.rb,.cd,.lg,.ib,.bt,.ba,.bg,.sw,.fg,.ci,.hv>span:first-child{flex-shrink:0}
 .em,.fb,.ch,.bg,.et,.bx,.ps button,.th,.ss button,.sm{border-radius:6px}.ib,.bt,.bs2,.bn,.sr,.ss,.ee{border-radius:8px}
 .dt,.fd,.cd,.lg,.lg button,.sp,.si,.hv>span:first-child,.pr,.pf,.ph,.sw,.sk,.mb,.mf{border-radius:99px}
 .card,.tr,.ph,.tp>div,.lg button[aria-pressed=true],.ss button[aria-checked=true],.th{background:var(--s1)}
 .ch,.lg,.sp,.pr,.ps button,.sw,.sr,.mb,.ss,.et,.bg[data-k=t3]{background:var(--s2)}
 .ib,.bt,.card,.tr,.ph,.sw{border:1px solid var(--ln)}
-.cd,.dt{background:var(--t3)}.ch,.sb,.kl,.hg>div>div:first-child,.gs,.cp,.pv,.ci,.co,.lg button{color:var(--t3)}.ib,.bt,.bx,.ps button,.sr button,.fr,.cu,.cs,.ss button,.et,.em2{color:var(--t2)}
+.cd,.dt{background:var(--t3)}.sb,.kl,.hg>div>div:first-child,.gs,.cp,.pv,.ci,.co{color:var(--t3)}.ch,.lg button,.ib,.bt,.bx,.ps button,.sr button,.fr,.cu,.cs,.ss button,.et,.em2{color:var(--t2)}
 .sb,.gs,.cp,.pv,.cu,.cs,.co,.kl,.hg>div>div:first-child,.fb,.ch,.rb,.sm,.lg button,.ps button,.ss button,.et{font-size:11px}
 .rb,.bs2,.hv,.hn,.ps button[aria-checked=true],.sr button[aria-checked=true],.sv,.fr,.cv,.et strong{font-weight:600}
 .mn,.ps button{font-family:var(--mn)}.ns{user-select:none}.el,.hv>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.m0,.hd,.hg>div,.hv,.md,.gf,.gk{min-width:0}
@@ -66,6 +66,6 @@ svg{fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-l
 .ev{display:flex;flex-wrap:wrap;gap:5px}.et{font:11px var(--mn)}
 .co{padding:8px 12px;flex-wrap:wrap}.ep{align-items:center;text-align:center;padding:28px 16px;gap:10px;margin:14px auto}.ee{width:32px;height:32px}
 @media(min-width:640px){.gd{grid-template-columns:repeat(2,minmax(0,1fr))}}
-@media(max-width:420px){.sh{padding:8px 8px 14px;gap:8px}.gd{gap:8px}.sb,.pv{display:none}.hg{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 0}.hg>div:nth-child(3){border-left:0;padding-left:2px}.hg>div:nth-child(n+3){border-top:1px solid var(--l2);padding-top:8px}.lk{width:100%}.sr button{font-size:11px}}
+@media(max-width:480px){.sh{padding:8px 8px 14px;gap:8px}.gd{gap:8px}.sb,.pv{display:none}.hg{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 0}.hg>div:nth-child(3){border-left:0;padding-left:2px}.hg>div:nth-child(n+3){border-top:1px solid var(--l2);padding-top:8px}.lk{width:100%}.sr button{font-size:11px}}
 @media(max-width:360px){.wm{display:none}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

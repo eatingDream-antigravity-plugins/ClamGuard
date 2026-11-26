@@ -1035,7 +1035,7 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     assert.equal(yieldMfc.controller, "Macs Fan Control");
     assert.equal(yieldMfc.badgeText, "已让位");
     assert.equal(yieldMfc.badgeKind, "wn");
-    assert.ok(yieldMfc.caption.includes("Macs Fan Control"));
+    assert.equal(yieldMfc.caption, "只读 · SMC 手动 · Macs Fan Control");
 
     const unavail = describeFanState({
       status: "unavailable",
