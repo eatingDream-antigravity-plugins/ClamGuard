@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.3](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.2...v1.2.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **arch:** decouple display guard from brightness and MCP server loops ([#14](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/14)) ([d23da71](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/d23da7123a8400a185444fbcf1348f3f9f2c78e2))
+
 ## [1.2.2](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.1...v1.2.2) (2026-11-25)
 
 
