@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Mac Clamshell MCP" width="80" height="80">
+<img src="assets/logo.svg" alt="ClamGuard" width="80" height="80">
 
-# Mac Clamshell MCP
+# ClamGuard (mac-clamshell-mcp)
 
 **Keep your closed MacBook cool, quiet, and predictable when running builds or AI agents.**
 
-English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[Homepage](https://clamguard.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
@@ -14,7 +14,7 @@ English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatin
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/social-preview.png" alt="Mac Clamshell MCP panel preview" width="860">
+<img src="docs/social-preview.png" alt="ClamGuard panel preview" width="860">
 
 </div>
 
@@ -79,6 +79,10 @@ npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 - [Portable Agent Skill (`skills/mac-clamshell/SKILL.md`)](skills/mac-clamshell/SKILL.md)
 - [LLM Index (`llms.txt`)](llms.txt) · [Contributor Guide (`AGENTS.md`)](AGENTS.md)
 - [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+
+## Antigravity Plugin Suite
+
+Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp) (`context-radar-mcp`) · **ClamGuard** (`mac-clamshell-mcp`) · [RemoteCast](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp) (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit) (`agy-mcp-kit`).
 
 ## License
 

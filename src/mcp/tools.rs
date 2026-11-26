@@ -160,7 +160,7 @@ pub fn list_resources_json() -> Value {
         "resources": [
             {
                 "uri": APP_URI,
-                "name": "Mac Clamshell Dashboard",
+                "name": "ClamGuard Dashboard",
                 "description": "Live macOS lid state, power, thermal pressure, performance throttling, display guard, and built-in brightness controls.",
                 "mimeType": APP_MIME,
                 "_meta": {
@@ -222,8 +222,8 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
         "tools": [
             {
                 "name": "clamshell_panel",
-                "title": "Mac Clamshell",
-                "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal pressure, read-only fan telemetry, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
+                "title": "ClamGuard",
+                "description": "Open the ClamGuard live dashboard showing macOS lid state, power/battery, thermal pressure, read-only fan telemetry, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -238,8 +238,8 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
                     "ui": { "resourceUri": APP_URI },
                     "com.google.antigravity/ui": {
                         "entrypoints": [
-                            { "type": "global", "title": "Mac Clamshell" },
-                            { "type": "aux_pane", "title": "Mac Clamshell" }
+                            { "type": "global", "title": "ClamGuard" },
+                            { "type": "aux_pane", "title": "ClamGuard" }
                         ]
                     }
                 }
