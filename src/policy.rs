@@ -28,6 +28,33 @@ pub struct Policy {
     pub nice_level: i32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileJobs {
+    pub normal: u32,
+    pub utility: u32,
+    pub eco: u32,
+    pub strict: u32,
+    pub auto_eco: u32,
+}
+
+pub fn compute_profile_jobs(topo: &CpuTopology, battery_pct: Option<u32>) -> ProfileJobs {
+    ProfileJobs {
+        normal: apply_profile_defaults("normal", topo, battery_pct, false).1,
+        utility: apply_profile_defaults("utility", topo, battery_pct, false).1,
+        eco: apply_profile_defaults("eco", topo, battery_pct, false).1,
+        strict: apply_profile_defaults("strict", topo, battery_pct, false).1,
+        auto_eco: apply_profile_defaults("eco", topo, battery_pct, true).1,
+    }
+}
+
+pub fn policy_settings_signature(settings: &Settings) -> String {
+    format!(
+        "{}|{}|{}",
+        settings.mode_override, settings.max_jobs_override, settings.ac_closed_profile
+    )
+}
+
 /// Apply canonical profile defaults (max_jobs, taskpolicy, nice_level).
 pub fn apply_profile_defaults(
     profile: &str,

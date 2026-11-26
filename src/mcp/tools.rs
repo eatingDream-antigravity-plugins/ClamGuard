@@ -1,4 +1,4 @@
-use crate::i18n::{detect_lang, parse_lang_tag, Lang};
+use crate::i18n::{parse_lang_tag, Lang};
 use crate::mcp::telemetry::{summarize_for_model, TelemetryEngine};
 use crate::platform::display_ffi::{clamp_percent, DisplayBackend};
 use crate::platform::macos::ProbeBackend;
@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 pub const APP_URI: &str = "ui://mac-clamshell-mcp/panel";
 pub const APP_MIME: &str = "text/html;profile=mcp-app";
@@ -388,7 +388,8 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                 }
             };
             match engine.configure(&patch) {
-                Ok(collected) => {
+                Ok(_) => {
+                    let collected = engine.collect(true);
                     let mut sc =
                         serde_json::to_value(&*collected.snapshot).unwrap_or_else(|_| json!({}));
                     if let Some(obj) = sc.as_object_mut() {
@@ -402,7 +403,7 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     })
                 }
                 Err(err) => {
-                    let msg = match detect_lang(None) {
+                    let msg = match engine.detect_lang() {
                         Lang::ZhCn => format!("更新配置失败: {err}"),
                         Lang::En => format!("Configuration update failed: {err}"),
                     };
@@ -415,7 +416,7 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
         }
         "clamshell_set_brightness" => {
             let Some(raw_pct) = args.get("percent").and_then(|v| v.as_f64()) else {
-                let msg = match detect_lang(None) {
+                let msg = match engine.detect_lang() {
                     Lang::ZhCn => "亮度调节失败: percent 必须是 0 到 100 之间的数字".to_string(),
                     Lang::En => {
                         "Brightness update failed: percent must be a finite number between 0 and 100"
@@ -443,14 +444,17 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     "open" => Some(false),
                     _ => None,
                 });
+            let t0 = Instant::now();
             match engine.set_brightness(clamped as f64, lid_override) {
-                Ok((collected, action)) => {
+                Ok(action) => {
                     if action.mode == "unavailable" {
                         return json!({
                             "isError": true,
                             "content": [{ "type": "text", "text": "Brightness update failed: no built-in display detected on this Mac" }]
                         });
                     }
+                    let mut collected = engine.collect(true);
+                    collected.server_ms = t0.elapsed().as_millis() as u64;
                     let lang = parse_lang_tag(&collected.snapshot.locale).unwrap_or(Lang::En);
                     let mut sc =
                         serde_json::to_value(&*collected.snapshot).unwrap_or_else(|_| json!({}));
@@ -487,7 +491,7 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     })
                 }
                 Err(err) => {
-                    let msg = match detect_lang(None) {
+                    let msg = match engine.detect_lang() {
                         Lang::ZhCn => format!("亮度调节失败: {err}"),
                         Lang::En => format!("Brightness update failed: {err}"),
                     };

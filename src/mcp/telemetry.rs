@@ -1,17 +1,18 @@
 use crate::guard::{
-    read_display_info, run_guard_tick_locked, set_brightness_synced, BrightnessAction,
-    DisplayGuardSummary, DisplayInfo,
+    read_display_info, set_brightness_synced, BrightnessAction, DisplayGuardSummary, DisplayInfo,
 };
 use crate::i18n::{detect_lang, parse_lang_tag, Lang};
 use crate::launchagent::plist_exists;
 use crate::platform::display_ffi::DisplayBackend;
 use crate::platform::macos::{MemorySummary, ProbeBackend};
 use crate::policy::{
-    build_env_vars, compute_policy, format_lid, format_power, format_thermal, CpuTopology, Policy,
+    build_env_vars, compute_policy, compute_profile_jobs, format_lid, format_power, format_thermal,
+    CpuTopology, Policy, ProfileJobs,
 };
 use crate::state::{
-    abbreviate_home, format_iso8601_utc, load_guard_state, load_guard_state_opt, now_epoch_ms,
-    read_settings, settings_path, sha256_hex_16, write_settings, Settings, SettingsPatch,
+    abbreviate_home, file_fingerprint, format_iso8601_utc, guard_state_path, load_guard_state,
+    load_guard_state_opt, now_epoch_ms, read_settings, settings_path, sha256_hex_16,
+    write_settings, DaemonLock, Settings, SettingsPatch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -63,6 +64,7 @@ pub struct TelemetrySnapshot {
     pub cpu_topology: CpuTopology,
     pub settings: Settings,
     pub policy: Policy,
+    pub profile_jobs: ProfileJobs,
     pub env_vars: BTreeMap<String, String>,
     pub display: DisplayInfo,
     pub display_guard: Option<DisplayGuardSummary>,
@@ -113,6 +115,7 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "cpuTopology": s.cpu_topology,
         "settings": s.settings,
         "policy": s.policy,
+        "profileJobs": s.profile_jobs,
         "envVars": s.env_vars,
         "display": s.display,
         "displayGuard": s.display_guard,
@@ -236,6 +239,8 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
 struct CachedEntry {
     at: Instant,
     gen: u64,
+    settings_fp: Option<(u128, u64)>,
+    guard_fp: Option<(u128, u64)>,
     snapshot: Arc<TelemetrySnapshot>,
 }
 
@@ -342,20 +347,6 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         });
     }
 
-    /// Execute one lock-coordinated Display Guard tick using this engine's probe + display backends.
-    /// Returns `true` when the guard loop should poll rapidly (closed lid or wake-restore active).
-    pub fn run_background_guard_tick(&self) -> bool {
-        match run_guard_tick_locked(&self.data_dir, &self.probe, &self.display) {
-            Ok(outcome) => {
-                if outcome.changed {
-                    self.invalidate_cache();
-                }
-                outcome.fast_poll
-            }
-            Err(_) => false,
-        }
-    }
-
     pub fn invalidate_cache(&self) {
         self.settings_gen.fetch_add(1, Ordering::SeqCst);
         let mut guard = lock_unpoisoned(&self.state);
@@ -366,29 +357,29 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         let _ = self.collect(true);
     }
 
-    pub fn configure(&self, patch: &SettingsPatch) -> Result<CollectedTelemetry, String> {
-        write_settings(&self.data_dir, patch)
+    /// Persist settings and asynchronously wake any fallback guard loop.
+    /// Does NOT run blocking hardware guard ticks or synchronous telemetry probes inside the mutation.
+    pub fn configure(&self, patch: &SettingsPatch) -> Result<Settings, String> {
+        let updated = write_settings(&self.data_dir, patch)
             .map_err(|e| format!("failed to write settings: {e}"))?;
         if patch.guard_enabled.is_some() || patch.thermal_bright_cap_pct.is_some() {
-            self.run_background_guard_tick();
             self.notify_guard_wake();
         }
         self.invalidate_cache();
-        Ok(self.collect(true))
+        Ok(updated)
     }
 
+    /// Apply user brightness safely under `FileLock` and invalidate cached telemetry.
+    /// Callers sequence `collect(true)` separately so mutations never re-enter the coalescer.
     pub fn set_brightness(
         &self,
         percent: f64,
         lid_override: Option<bool>,
-    ) -> Result<(CollectedTelemetry, BrightnessAction), String> {
-        let t0 = Instant::now();
+    ) -> Result<BrightnessAction, String> {
         let action =
             set_brightness_synced(&self.data_dir, percent, lid_override, &self.probe, &self.display)?;
         self.invalidate_cache();
-        let mut collected = self.collect(true);
-        collected.server_ms = t0.elapsed().as_millis() as u64;
-        Ok((collected, action))
+        Ok(action)
     }
 
     pub fn detect_lang(&self) -> Lang {
@@ -404,6 +395,13 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         Ok((method, locked_at_ms, server_ms))
     }
 
+    fn disk_fingerprints(&self) -> (Option<(u128, u64)>, Option<(u128, u64)>) {
+        (
+            file_fingerprint(&settings_path(&self.data_dir)),
+            file_fingerprint(&guard_state_path(&self.data_dir)),
+        )
+    }
+
     fn run_leader(
         &self,
         req_gen: u64,
@@ -414,6 +412,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             slot: Arc::clone(&slot),
             completed: false,
         };
+        let (settings_fp, guard_fp) = self.disk_fingerprints();
         let snapshot = Arc::new(self.probe_fresh());
         {
             let mut guard = lock_unpoisoned(&self.state);
@@ -422,6 +421,8 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                 guard.cache = Some(CachedEntry {
                     at: Instant::now(),
                     gen: req_gen,
+                    settings_fp,
+                    guard_fp,
                     snapshot: Arc::clone(&snapshot),
                 });
             }
@@ -441,100 +442,29 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         snapshot
     }
 
-    #[allow(dead_code)]
-    pub fn collect_swr(self: &Arc<Self>) -> CollectedTelemetry
-    where
-        P: 'static,
-        D: 'static,
-    {
-        let req_gen = self.settings_gen.load(Ordering::SeqCst);
-        let mut bg_slot: Option<Arc<(Mutex<InFlightSlot>, Condvar)>> = None;
-        let cached_hit: Option<(Arc<TelemetrySnapshot>, bool)> = {
-            let mut guard = lock_unpoisoned(&self.state);
-            let hit = guard.cache.as_ref().and_then(|c| {
-                if c.gen == req_gen {
-                    let fresh = (c.at.elapsed().as_millis() as u64) < self.cache_ttl_ms;
-                    Some((Arc::clone(&c.snapshot), fresh))
-                } else {
-                    None
-                }
-            });
-            if let Some((snapshot, fresh)) = hit {
-                if !fresh {
-                    let already_running = guard
-                        .in_flight
-                        .as_ref()
-                        .map(|s| lock_unpoisoned(&s.0).gen == req_gen)
-                        .unwrap_or(false);
-                    if !already_running {
-                        let slot = Arc::new((
-                            Mutex::new(InFlightSlot {
-                                gen: req_gen,
-                                result: None,
-                                aborted: false,
-                            }),
-                            Condvar::new(),
-                        ));
-                        guard.in_flight = Some(Arc::clone(&slot));
-                        bg_slot = Some(slot);
-                    }
-                }
-                Some((snapshot, !fresh))
-            } else {
-                None
-            }
-        };
-
-        if let Some(slot) = bg_slot {
-            let engine = Arc::clone(self);
-            let slot_for_thread = Arc::clone(&slot);
-            if std::thread::Builder::new()
-                .name("clamshell-swr".into())
-                .spawn(move || {
-                    let _ = engine.run_leader(req_gen, slot_for_thread);
-                })
-                .is_err()
-            {
-                let mut guard = lock_unpoisoned(&self.state);
-                if guard
-                    .in_flight
-                    .as_ref()
-                    .map(|s| Arc::ptr_eq(s, &slot))
-                    .unwrap_or(false)
-                {
-                    guard.in_flight = None;
-                }
-                let (lock, cvar) = &*slot;
-                lock_unpoisoned(lock).aborted = true;
-                cvar.notify_all();
-            }
-        }
-
-        if let Some((snapshot, stale)) = cached_hit {
-            return CollectedTelemetry {
-                snapshot,
-                server_ms: 0,
-                from_cache: true,
-                stale,
-            };
-        }
-
-        self.collect(false)
-    }
-
-    /// Collect live or cached telemetry with strict single-flight coalescing & generation fencing.
+    /// Collect live or cached telemetry with strict single-flight coalescing, generation fencing,
+    /// and passive disk fingerprint observation for external guard daemons.
     pub fn collect(&self, force: bool) -> CollectedTelemetry {
         let t0 = Instant::now();
         let req_gen = self.settings_gen.load(Ordering::SeqCst);
+        let cur_fps = if !force {
+            Some(self.disk_fingerprints())
+        } else {
+            None
+        };
 
         let follower_slot: Option<Arc<(Mutex<InFlightSlot>, Condvar)>>;
         let leader_slot: Option<Arc<(Mutex<InFlightSlot>, Condvar)>>;
 
         {
             let mut guard = lock_unpoisoned(&self.state);
-            if !force {
+            if let Some((settings_fp, guard_fp)) = cur_fps {
                 if let Some(ref c) = guard.cache {
-                    if c.gen == req_gen && (c.at.elapsed().as_millis() as u64) < self.cache_ttl_ms {
+                    if c.gen == req_gen
+                        && c.settings_fp == settings_fp
+                        && c.guard_fp == guard_fp
+                        && (c.at.elapsed().as_millis() as u64) < self.cache_ttl_ms
+                    {
                         return CollectedTelemetry {
                             snapshot: Arc::clone(&c.snapshot),
                             server_ms: 0,
@@ -649,12 +579,16 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         let display = read_display_info(&self.display, &hw.lid_state, &guard_for_disp);
         let display_guard = guard_opt.as_ref().map(DisplayGuardSummary::from);
 
-        let runner_active = self.bg_guard_active.load(Ordering::SeqCst) || plist_exists();
+        let runner_active = self.bg_guard_active.load(Ordering::SeqCst)
+            || plist_exists()
+            || DaemonLock::is_active(&self.data_dir);
+        let effective_thermal_cap =
+            guard_for_disp.machine.thermal_capped && !guard_for_disp.user_intent.user_override_thermal;
         let guard_status = if !settings.guard_enabled {
             "paused"
         } else if runner_active && hw.lid_state == "closed" {
             "protecting"
-        } else if runner_active && guard_for_disp.thermal_capped {
+        } else if runner_active && effective_thermal_cap {
             "thermal_cap"
         } else if runner_active {
             "armed"
@@ -671,6 +605,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             &host_info.cpu_topology,
             &settings,
         );
+        let profile_jobs = compute_profile_jobs(&host_info.cpu_topology, hw.battery_pct);
         let env_vars = build_env_vars(&policy);
 
         let mut snap = TelemetrySnapshot {
@@ -696,6 +631,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             cpu_topology: host_info.cpu_topology,
             settings,
             policy,
+            profile_jobs,
             env_vars,
             display,
             display_guard,
@@ -841,30 +777,58 @@ mod tests {
         assert_eq!(payload["unchanged"], true);
         assert!(payload.get("host").is_none());
 
-        // 3. Brightness update changes hash and returns live brightness
-        let (upd, act) = engine.set_brightness(45.0, Some(false)).unwrap();
+        // 3. Brightness update changes hash and returns live brightness (sequenced separately from collect)
+        let act = engine.set_brightness(45.0, Some(false)).unwrap();
+        let upd = engine.collect(true);
         assert!(act.applied);
         assert_eq!(upd.snapshot.display.percent, Some(45));
+        assert_eq!(upd.snapshot.profile_jobs.normal, 8);
+        assert_eq!(upd.snapshot.profile_jobs.utility, 2);
+        assert_eq!(upd.snapshot.profile_jobs.eco, 2);
+        assert_eq!(upd.snapshot.profile_jobs.strict, 1);
         assert_ne!(upd.snapshot.hash, h0);
 
-        // 4. Background guard tick zeroes closed panel and updates guardStatus -> protecting
+        // 4. External/standalone guard tick zeroes closed panel; TelemetryEngine observes disk
+        // fingerprint change passively without push-coupling from the guard daemon!
         lid_closed.store(true, Ordering::Relaxed);
-        engine.run_background_guard_tick();
+        let ext_probe = FakeProbe {
+            delay_ms: 0,
+            calls: Arc::clone(&calls),
+            uptime: Arc::clone(&uptime),
+            lid_closed: Arc::clone(&lid_closed),
+        };
+        let ext_disp = FakeDisplay {
+            brightness: Arc::clone(&bright),
+        };
+        let tick = crate::guard::run_guard_tick_locked(&dir, &ext_probe, &ext_disp).unwrap();
+        assert!(tick.changed);
         assert_eq!(*bright.lock().unwrap(), 0.0);
-        let closed_snap = engine.collect(false).snapshot;
-        assert_eq!(closed_snap.guard_status, "protecting");
+        let closed_col = engine.collect(false);
+        assert!(!closed_col.from_cache);
+        assert_eq!(closed_col.snapshot.guard_status, "protecting");
 
-        // 5. Generation fencing during in-flight collect + guard pause
+        // 5. configure() wakes guard asynchronously without running blocking hardware guard ticks
+        *bright.lock().unwrap() = 0.65;
         let e1 = Arc::clone(&engine);
         let t_old = std::thread::spawn(move || e1.collect(true));
         std::thread::sleep(Duration::from_millis(10));
-        let cfg_res = engine
+        engine
             .configure(&SettingsPatch {
                 mode_override: Some("strict".into()),
+                guard_enabled: Some(true),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        // Proof: configure() did NOT synchronously run a closed-lid guard tick to zero brightness
+        assert_eq!(*bright.lock().unwrap(), 0.65);
+
+        engine
+            .configure(&SettingsPatch {
                 guard_enabled: Some(false),
                 ..SettingsPatch::default()
             })
             .unwrap();
+        let cfg_res = engine.collect(true);
         let old_res = t_old.join().unwrap();
         assert_eq!(old_res.snapshot.policy.profile, "eco");
         assert_eq!(cfg_res.snapshot.policy.profile, "strict");
@@ -873,60 +837,6 @@ mod tests {
         let cached = engine.collect(false);
         assert!(cached.from_cache);
         assert_eq!(cached.snapshot.policy.profile, "strict");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn swr_returns_stale_immediately_and_revalidates_in_background() {
-        let dir =
-            std::env::temp_dir().join(format!("mac-clamshell-swr-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let uptime = Arc::new(AtomicU64::new(3600));
-        let lid_closed = Arc::new(AtomicBool::new(false));
-        let bright = Arc::new(Mutex::new(0.70f32));
-
-        let engine = Arc::new(TelemetryEngine::with_ttl(
-            dir.clone(),
-            "mac-clamshell-mcp".into(),
-            FakeProbe {
-                delay_ms: 45,
-                calls: Arc::clone(&calls),
-                uptime: Arc::clone(&uptime),
-                lid_closed: Arc::clone(&lid_closed),
-            },
-            FakeDisplay {
-                brightness: Arc::clone(&bright),
-            },
-            5,
-        ));
-
-        engine.prewarm();
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-        let fresh = engine.collect_swr();
-        assert!(fresh.from_cache);
-        assert!(!fresh.stale);
-        assert_eq!(fresh.snapshot.lid_state, "open");
-
-        std::thread::sleep(Duration::from_millis(12));
-        lid_closed.store(true, Ordering::Relaxed);
-
-        let t0 = Instant::now();
-        let swr1 = engine.collect_swr();
-        let swr2 = engine.collect_swr();
-        let elapsed_ms = t0.elapsed().as_millis();
-        assert!(elapsed_ms < 15, "SWR blocked for {elapsed_ms}ms");
-        assert!(swr1.from_cache && swr1.stale);
-        assert!(swr2.from_cache && swr2.stale);
-        assert_eq!(swr1.snapshot.lid_state, "open");
-        assert_eq!(swr2.snapshot.lid_state, "open");
-
-        let after = engine.collect(false);
-        assert_eq!(after.snapshot.lid_state, "closed");
-        assert!(!after.stale);
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

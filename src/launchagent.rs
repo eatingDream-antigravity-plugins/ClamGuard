@@ -112,6 +112,10 @@ fn is_launchctl_loaded() -> bool {
     ok
 }
 
+pub fn is_launchagent_active() -> bool {
+    plist_exists() && is_launchctl_loaded()
+}
+
 pub fn guard_service_status(data_dir: &Path) -> GuardServiceStatus {
     let settings = read_settings(data_dir);
     let p_path = plist_path();

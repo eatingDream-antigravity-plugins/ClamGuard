@@ -636,38 +636,44 @@ async function flushQueue() {
   isSyncing = true;
   patchFeedback();
 
-  while (pendingPatch) {
-    const patch = pendingPatch;
-    pendingPatch = null;
-    const myGen = saveGen;
+  try {
+    while (pendingPatch) {
+      const patch = pendingPatch;
+      pendingPatch = null;
+      const myGen = saveGen;
 
-    try {
-      const sc = await rpc("clamshell_configure", patch);
-      confirmedData = sc;
-      if (sc.hash) curHash = sc.hash;
-      const settled = myGen === saveGen && !pendingPatch;
-      curData = settled
-        ? sc
-        : curData?.settings
-        ? computeOptimisticState(sc, curData.settings)
-        : sc;
-      if (settled) {
-        patchAll(curData);
-        setFeedback("ok", bi("✓ Saved", "✓ 已保存"));
-      }
-    } catch {
-      if (!pendingPatch) {
+      try {
+        const sc = await rpc("clamshell_configure", patch);
+        confirmedData = sc;
+        if (sc.hash) curHash = sc.hash;
+        const settled = myGen === saveGen && !pendingPatch;
+        curData = settled
+          ? sc
+          : curData?.settings
+          ? computeOptimisticState(sc, curData.settings)
+          : sc;
+        if (settled) {
+          patchAll(curData);
+          setFeedback("ok", bi("✓ Saved", "✓ 已保存"));
+        }
+      } catch {
+        if (pendingPatch) {
+          // Newer edit queued while RPC failed: preserve non-conflicting failed fields and keep flushing.
+          pendingPatch = { ...patch, ...pendingPatch };
+          continue;
+        }
         curData = confirmedData;
         patchAll(curData);
+        setFeedback("err", bi("Save failed", "保存失败"), () => queueSettings(patch));
+        break;
       }
-      setFeedback("err", bi("Save failed", "保存失败"), () => queueSettings(patch));
-      break;
     }
+  } finally {
+    saveInFlight = false;
+    isSyncing = Boolean(pendingPatch);
+    patchFeedback();
+    if (pendingPatch) flushQueue();
   }
-
-  saveInFlight = false;
-  isSyncing = Boolean(pendingPatch);
-  patchFeedback();
 }
 
 function queueSettings(patch) {
@@ -864,7 +870,7 @@ app.ontoolresult = (r) => {
 
 app.onhostcontextchanged = (ctx) => {
   syncHostContext(ctx);
-  if (ctx?.containerDimensions || ctx?.displayMode) {
+  if ((ctx?.containerDimensions || ctx?.displayMode) && !isDraggingBright && !isBrightSyncing) {
     poller.forceNow("host-context").catch(() => {});
   }
 };
