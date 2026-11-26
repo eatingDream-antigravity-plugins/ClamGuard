@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.3.0...v1.4.0) (2026-11-26)
+
+
+### Features
+
+* Opus Editorial-Warm panel, read-only AppleSMC fan telemetry, and backend hardening ([#18](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/issues/18)) ([7594531](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/commit/7594531580eae948b71ce859fa8a784431fdaf5d))
+
 ## [1.3.0](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.2.3...v1.3.0) (2026-11-26)
 
 
