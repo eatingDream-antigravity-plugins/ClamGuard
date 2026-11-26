@@ -44,7 +44,7 @@
   <!-- Org / Repo Slug Pill -->
   <rect x="148" y="81" width="512" height="36" rx="18" fill="#1C1B18" stroke="#D97757" stroke-opacity="0.38"/>
   <circle cx="168" cy="99" r="4.5" fill="#4E9F72"/>
-  <text x="182" y="104" font-size="13.5" font-family="ui-monospace,'SF Mono',Menlo,monospace" fill="#E7E1D7">eatingDream-antigravity-plugins/mac-clamshell-mcp</text>
+  <text x="182" y="104" font-size="13.5" font-family="ui-monospace,'SF Mono',Menlo,monospace" fill="#E7E1D7">eatingDream-antigravity-plugins/ClamGuard</text>
 
   <!-- Hero Title & Subtitle -->
   <text x="72" y="210" font-size="58" font-weight="700" font-family="Georgia,'New York',ui-serif,serif" fill="#F4F1EA" letter-spacing="-1.1">Mac Clamshell MCP</text>

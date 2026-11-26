@@ -13,7 +13,7 @@
 
 Install the prebuilt macOS binary (Apple Silicon & Intel):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
 ```
 
 Generic stdio MCP configuration (`mcpServers`):

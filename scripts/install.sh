@@ -1,12 +1,12 @@
 #!/bin/sh
 # Install the Mac Clamshell MCP Antigravity plugin from GitHub Releases (macOS).
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
 #   ./scripts/install.sh [--version v1.0.0] [--dest /path/to/plugin-dir]
 
 set -eu
 
-REPO="eatingDream-antigravity-plugins/mac-clamshell-mcp"
+REPO="eatingDream-antigravity-plugins/ClamGuard"
 VERSION="${MAC_CLAMSHELL_VERSION:-}"
 DEST="${ANTIGRAVITY_PLUGINS_DIR:-${HOME}/.gemini/config/plugins}/mac-clamshell-mcp"
 
