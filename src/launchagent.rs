@@ -106,6 +106,12 @@ fn current_uid() -> u32 {
 }
 
 fn is_launchctl_loaded() -> bool {
+    if let Ok(mock) = std::env::var("MAC_CLAMSHELL_MOCK_LAUNCHCTL") {
+        return matches!(
+            mock.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "loaded"
+        );
+    }
     if skip_launchctl() {
         return plist_exists();
     }

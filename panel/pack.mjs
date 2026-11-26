@@ -16,10 +16,11 @@ const distDir = path.join(__dirname, "dist");
 const outHtml = path.join(distDir, "panel.html");
 const BOOT_TOKEN = "/*__MAC_CLAMSHELL_BOOT__*/";
 const MODULES = ["bridge.js", "polling.js", "brightness.js", "model.js"];
-const SIZE_FAIL_BYTES = 46_080;
-const SIZE_WARN_BYTES = 44_000;
+const SIZE_FAIL_BYTES = 43_500;
+const SIZE_WARN_BYTES = 42_500;
 
 function tryLoadEsbuild() {
+  if (process.env.MAC_CLAMSHELL_BUNDLER === "bun") return null;
   for (const mod of [process.env.ESBUILD_PATH, "esbuild"].filter(Boolean)) {
     try { return require(mod); } catch {}
   }
@@ -72,6 +73,10 @@ function cleanCss(css) {
   return css
     .replace(/--buncss-[a-z0-9-]+:[^;}"']+;?/gi, "")
     .replace(/--([a-z0-9-]+):\s+/gi, "--$1:")
+    .replace(/,\s+/g, ",")
+    .replace(/:\s+/g, ":")
+    .replace(/\s*\{\s*/g, "{")
+    .replace(/;\s*/g, ";")
     .replace(/;}/g, "}")
     .replace(/<\/style/gi, "<\\/style")
     .trim();
@@ -144,8 +149,8 @@ const jsBytes = Buffer.byteLength(jsCode, "utf8");
 const cssBytes = Buffer.byteLength(cssCode, "utf8");
 const totalBytes = Buffer.byteLength(html, "utf8");
 
-if (totalBytes >= SIZE_FAIL_BYTES) {
-  throw new Error(`panel.html exceeds hard size gate: ${totalBytes} B >= ${SIZE_FAIL_BYTES} B`);
+if (totalBytes > SIZE_FAIL_BYTES) {
+  throw new Error(`panel.html exceeds hard size gate: ${totalBytes} B > ${SIZE_FAIL_BYTES} B`);
 }
 if (totalBytes > SIZE_WARN_BYTES) {
   console.warn(`WARN: panel.html (${totalBytes} B) exceeds ${SIZE_WARN_BYTES} B warning threshold`);

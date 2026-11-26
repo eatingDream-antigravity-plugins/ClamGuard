@@ -4,111 +4,82 @@
 
 # Mac Clamshell MCP
 
-**让合盖干活的 MacBook 保持凉快安静，同时确保合盖后内置屏幕彻底熄灭。**
+**让合盖跑编译与 AI Agent 的 MacBook 保持凉快、安静且行为可预期。**
+
+[English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
-
-[English](README.md) | 简体中文
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/social-preview.png" alt="Mac Clamshell MCP 面板预览" width="860">
 
 </div>
 
-## 它能帮你做什么
+## 它是什么
 
-合盖跑编译、测试或 AI Agent 时，MacBook 往往发烫且内屏背光容易偷偷常亮。Mac Clamshell MCP 会实时监测开合盖、供电和热压力，让设备保持安静凉爽：
+一个原生 Rust 编写的 macOS MCP 服务、SEP-1865 实时控制面板与命令行包裹器：实时监测开合盖、供电和热压力，自动限流重型构建并守护合盖显示状态。
 
-- **合盖彻底熄屏，开盖恢复亮度**：只要 Antigravity 运行，内置 MCP 服务（`serve`）就会自动运行轻量熄屏守护——合盖即把内置屏背光降到 0% 并休眠内屏，开盖自动恢复原亮度。
-- **按状态自动限流降温**：结合开合盖、电池/插电状态以及 macOS 热压力（Apple Silicon 与 Intel 均支持），自动调整 CPU 优先级与并发上限。
-- **开盖时完全不打扰**：开盖且温度正常时在 Antigravity 中保持静默；仅在进入限流档位后才提醒 Agent 包裹重任务并限制并发。
-- **只读风扇遥测与第三方风扇软件零冲突**：通过无特权只读 IOKit `AppleSMC` 白名单读取实时风扇转速（零 root、零 SMC 写入），自动检测运行中的第三方风扇管理工具（`Macs Fan Control`、`TG Pro`、`Stats`、`iStat Menus`、`smcFanControl`、`Fanny`）并显示「只读监测」或「已让位」归属，绝不篡改用户自定义风扇曲线。
-- **双语面板、亮度调节与一键锁屏**：在 Antigravity 侧边栏（`EN / 中文`）查看盒盖、电源、温控、风扇与守护状态，切换熄屏守护或手动档位，调节亮度，或一键锁屏（核验 macOS 会话锁状态）并保持后台任务运行。
+它**不是**风扇调速工具、内核扩展或全局 `pmset` 修改器——全程无需 `sudo`，不改写风扇曲线，也不干扰其他应用。
+
+## 核心能力
+
+- **外屏友好的合盖熄屏守护**：未接外屏时，合盖通过 `pmset displaysleepnow` 休眠内屏并在开盖后恢复原亮度；连接外屏时保持外屏工作不触发 `displaysleepnow`，由 macOS 合盖机制管理内屏离线，并分别如实报告「已合盖」「内屏离线」与「已确认熄屏」状态，安全维护开盖恢复亮度目标。
+- **自动限流降温**：结合开合盖、电池/插电与 macOS 热压力（兼容 Apple Silicon 与 Intel），自动切换 `normal`、`utility`、`eco`、`strict` 档位并约束 CPU QoS（`taskpolicy` / `nice`）与并发上限。
+- **开盖凉爽时零打扰**：开盖且温控正常时钩子完全静默；仅在进入限流档位后才提示 Agent 包裹重任务。
+- **只读 AppleSMC 风扇遥测**：零写入读取实时风扇转速与 SMC 控制模式（`auto`、`manual` 或 `unknown`）；明确区分专职控扇软件（`Macs Fan Control`、`TG Pro`、`smcFanControl`）与监测软件（`Fanny`、`Stats`、`iStat Menus`），模式不可读时如实报告未知而绝不臆测控制方。
+- **双语实时面板与安全亮度调节**：在 Antigravity 侧边栏（`EN / 中文`）查看遥测、切换守护或档位；调节内建亮度前会在锁内核验真实硬件开盖与唤醒状态，合盖时仅保存恢复目标而不误点亮黑屏。
+- **可核验的一键锁屏**：通过 `SACLockScreenImmediate`（回退 `CGSession` / `pmset`）锁屏且不休眠后台任务，统一轮询 `CGSSessionScreenIsLocked` 并明确区分「已核验（`verified`）」与「已提交（`submitted`）」（`pmset` 回退未核验锁屏则报错）。
 
 | 档位 | 触发条件 | 实际效果 |
 | :--- | :--- | :--- |
-| **Normal / 正常** | 开盖且温度正常 | 不限制，全速运行 |
-| **Utility / 控温** | 合盖 + 插电 | Utility QoS（`nice 10`），并发限制在能效核数量（`2–4`，Intel 为总核数一半） |
-| **Eco / 节能** | 合盖 + 电池供电 | 后台 QoS（`nice 15`），最多 2 并发（电量低于等于 20% 时降为 1） |
-| **Strict / 强限** | 系统达到严重/临界热压力 | 最低优先级（`taskpolicy -b`、`nice 19`），单任务串行运行 |
+| **Normal / 正常** | 开盖且温度正常 | 全速运行，不限流 |
+| **Utility / 控温** | 合盖插电 | Utility QoS（`nice 10`），按能效核限流（`2–4` 并发） |
+| **Eco / 节能** | 合盖电池供电 | Background QoS（`nice 15`），最多 `2` 并发（`<=20%` 降为 `1`） |
+| **Strict / 强限** | 严重/临界热压力 | 最低优先级（`taskpolicy -b`、`nice 19`），单任务串行 |
 
-## 限流原理与隐私安全
+## 快速开始
 
-- **进程级生效、零 root、只读 SMC**：全程无需 `sudo`，绝不写入 NVRAM、SMC、内核扩展或全局 `pmset` 设置。风扇遥测仅以只读方式读取安全 SMC 键值，检测到第三方风扇工具时自动让位。`mac-clamshell-mcp run` 仅对被包裹的命令树应用 macOS `taskpolicy` QoS、POSIX `nice` 与标准构建并发环境变量，不影响其他应用，退出后零残留。
-- **可逆的用户态熄屏守护**：通过 macOS 标准 `DisplayServices` 用户态接口（与控制中心亮度滑块同级）调节背光，开盖或热压力恢复后自动还原原有亮度。
-- **100% 本地运行、零隐私上传**：无任何联网请求或统计上报；配置与守护状态仅保存在本地用户目录且仅当前用户可读写。
-
-## 安装
-
-支持 macOS（Apple Silicon 与 Intel）。安装脚本会下载并校验 SHA-256，随后安装到 `~/.gemini/config/plugins/mac-clamshell-mcp`（完成后重启或重载 Antigravity）：
+支持 macOS（Apple Silicon 与 Intel）。一键下载并校验发行版二进制，同时安装 Antigravity 插件：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
-# 或指定版本：
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh -s -- --version v1.2.0
 ```
 
-Antigravity 打开期间已自带合盖守护；如需退出 Antigravity 后仍 24/7 常驻守护，可执行下方终端命令中的 `mac-clamshell-mcp guard install` 安装 LaunchAgent。
-
-## 怎么用
-
-### 在 Antigravity 里用
-
-从侧边栏打开 **Mac Clamshell** 面板，或直接让 Agent 操作（例如：*"看看开合盖、电量和温度状态"*、*"把内置屏幕亮度调到 30%"*、*"用合盖限流模式跑测试"*）：
-
-| 工具 | 作用 |
-| :--- | :--- |
-| `clamshell_panel` | 打开实时控制面板，返回当前开合盖、供电、温度和档位信息。 |
-| `clamshell_set_brightness` | 调节内置屏幕亮度（0–100%）；合盖时仅更新开盖恢复亮度，不会误点亮黑屏。 |
-| `clamshell_lock_screen` | 立即锁屏（原生 `SACLockScreenImmediate`，自动回退 `CGSession`/`pmset`），保持 Mac 唤醒不中断后台任务。 |
-
-### 在终端里单独用
+也可直接在终端使用：
 
 ```sh
-mac-clamshell-mcp status                                         # 查看开合盖、供电、温度、亮度与档位
-mac-clamshell-mcp run -- cargo test                              # 按当前档位自动包裹重型命令
-mac-clamshell-mcp run --mode eco --jobs 2 --sh "npm run build && npm test"
-mac-clamshell-mcp brightness get                                 # 读取或设置内置屏幕亮度（0-100%）
-mac-clamshell-mcp brightness set 60
-mac-clamshell-mcp lock                                           # 立即锁屏且保持 Mac 唤醒
-# 可选：安装/管理 24/7 LaunchAgent 守护（或运行 ./scripts/install-launchagent.sh）/ 前台守护：
-mac-clamshell-mcp guard install --interval 10
-mac-clamshell-mcp guard status
-mac-clamshell-mcp guard uninstall
-mac-clamshell-mcp watch --daemon --interval 10
+mac-clamshell-mcp status
+mac-clamshell-mcp run -- cargo test
+mac-clamshell-mcp guard install --interval 10   # 可选：24/7 常驻 LaunchAgent
 ```
 
-## AI Agent 接入指南
+## 给 AI Agent 使用
 
-- **Antigravity**：执行上方一键安装脚本即自动注册 MCP 服务、生命周期钩子、实时面板与 [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md)。
-- **Claude Code / Codex / Cursor / OpenCode（任意 MCP 或终端 Agent）**：加载通用 Skill [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp`），按下方配置 stdio MCP，或在终端直接调用 `mac-clamshell-mcp status` / `run`：
-
-```json
-{
-  "mcpServers": {
-    "mac-clamshell-mcp": {
-      "command": "/path/to/mac-clamshell-mcp",
-      "args": ["serve", "--data-dir", "/path/to/mac-clamshell-data", "--panel-html", "/path/to/panel.html"]
-    }
-  }
-}
-```
-
-- **LLM 索引与协作指南**：[`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
-
-## 从源码构建
-
-需要 macOS、Rust（`cargo`）和 Node.js 20+：
+将通用 Skill 与 AI 指南接入 Claude Code、Codex、Cursor、OpenCode 或 Antigravity（完整的 CLI 参数、MCP 工具定义与限流档位均集中在此）：
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
-cd mac-clamshell-mcp
-(cd panel && npm install) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
-cargo test --locked && cargo build --release --locked && ./scripts/install-plugin.sh
+npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 ```
 
-## 参与贡献与许可证
+> 可直接对你的 Agent 说：*「请阅读 [`llms.txt`](llms.txt) 和 [`docs/ai-guide.md`](docs/ai-guide.md)，帮我配置 `mac-clamshell-mcp` stdio MCP，并在限流时自动包裹重型构建命令。」*
 
-欢迎提 PR 或反馈问题，详情见 [CONTRIBUTING.md](CONTRIBUTING.md)、[CHANGELOG.md](CHANGELOG.md) 和 [SECURITY.md](SECURITY.md)。本项目基于 [MIT License](LICENSE) 开源。
+## 安全与隐私边界
+
+- **运行时零主动联网**：二进制不发起任何网络请求，无统计上报。
+- **本地 MCP stdio 返回字段透明**：服务通过本地标准输入输出向已连接的 MCP 宿主返回设备遥测，包含主机名、芯片与 macOS 版本、负载/内存/风扇/显示状态，以及缩写后的本地配置路径与可执行文件路径（`~/...`）。
+- **零 root、零 SMC 写入**：全程无需 `sudo`，不写 SMC/NVRAM/内核扩展；本地配置与守护状态使用仅当前用户可读写的权限（`0700`/`0600`）。
+- **可逆的用户态亮度控制**：仅调用 macOS `DisplayServices` 用户态接口，硬件未确认开盖且内屏唤醒时绝不写入背光。
+
+## 文档索引
+
+- [AI Agent 指南与完整参考（`docs/ai-guide.md`）](docs/ai-guide.md) — MCP 工具参数、CLI 选项、限流档位表与 LaunchAgent 运维说明
+- [通用 Agent Skill（`skills/mac-clamshell/SKILL.md`）](skills/mac-clamshell/SKILL.md)
+- [LLM 索引（`llms.txt`）](llms.txt) · [贡献与开发指南（`AGENTS.md`）](AGENTS.md)
+- [参与贡献](CONTRIBUTING.md) · [更新日志](CHANGELOG.md) · [安全说明](SECURITY.md)
+
+## 许可证
+
+[MIT](LICENSE)

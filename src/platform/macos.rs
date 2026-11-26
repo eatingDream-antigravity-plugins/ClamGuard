@@ -755,7 +755,7 @@ mod native {
     }
 }
 
-type LidProbe = (String, String);
+type LidProbe = (String, String, bool);
 type PowerProbe = (String, Option<u32>, String);
 type ThermalProbe = (String, String, Option<u32>);
 
@@ -785,9 +785,29 @@ fn mock_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
 
+fn probe_lid_from_ioreg(ok: bool, out: &str) -> Option<LidProbe> {
+    if !ok {
+        return None;
+    }
+    let (lid, causes_sleep) = parse_ioreg_clamshell(out);
+    // Desktop Macs (Mac mini, Mac Studio, iMac, Mac Pro) return valid IOPMrootDomain output
+    // without an AppleClamshellState property; treat that as sensor-absent rather than degraded.
+    let valid_domain = out.contains("IOPMrootDomain");
+    let has_clamshell_key = out.contains("\"AppleClamshellState\"");
+    let sensor_absent = valid_domain && !has_clamshell_key && lid == "unknown";
+    Some((lid, causes_sleep, sensor_absent))
+}
+
 fn probe_lid() -> Option<LidProbe> {
     if let Some(mock) = mock_value("MAC_CLAMSHELL_MOCK_LID") {
-        return Some((mock.trim().to_string(), "unknown".to_string()));
+        let trimmed = mock.trim();
+        let sensor_absent = trimmed.eq_ignore_ascii_case("desktop");
+        let lid = if sensor_absent {
+            "unknown".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        return Some((lid, "unknown".to_string(), sensor_absent));
     }
     #[cfg(target_os = "macos")]
     {
@@ -796,7 +816,7 @@ fn probe_lid() -> Option<LidProbe> {
             &["-r", "-c", "IOPMrootDomain", "-d", "1", "-w", "0"],
             CMD_TIMEOUT_MS,
         );
-        ok.then(|| parse_ioreg_clamshell(&out))
+        probe_lid_from_ioreg(ok, &out)
     }
     #[cfg(not(target_os = "macos"))]
     None
@@ -818,12 +838,34 @@ fn mock_thermal() -> Option<ThermalProbe> {
         .then(|| resolve_thermal_status(therm.as_deref(), pressure.as_deref(), None, ""))
 }
 
+fn sample_thermal_sources(
+    darwin_pressure: Option<&str>,
+    pmset_res: Option<(bool, String)>,
+) -> Option<ThermalProbe> {
+    let pmset_out = match pmset_res {
+        Some((true, ref out)) => out.as_str(),
+        _ => "",
+    };
+    if darwin_pressure.is_none() && pmset_out.is_empty() {
+        return None;
+    }
+    Some(resolve_thermal_status(
+        None,
+        None,
+        darwin_pressure,
+        pmset_out,
+    ))
+}
+
 fn probe_thermal() -> Option<ThermalProbe> {
     if let Some(mock) = mock_thermal() {
         return Some(mock);
     }
-    let (ok, out) = probe_pmset(&["-g", "therm"])?;
-    ok.then(|| resolve_thermal_status(None, None, native_thermal_pressure(), &out))
+    // Sample Darwin thermal pressure and `pmset -g therm` independently so a pmset failure
+    // never drops an active serious/critical Darwin thermal signal.
+    let darwin = native_thermal_pressure();
+    let pmset = probe_pmset(&["-g", "therm"]);
+    sample_thermal_sources(darwin, pmset)
 }
 
 fn native_thermal_pressure() -> Option<&'static str> {
@@ -972,14 +1014,19 @@ impl MacOsProbeBackend {
             .sample(Duration::from_secs(12), fresh, sources.low_power);
 
         let unknown = || "unknown".to_string();
-        let degraded = lid.is_none() || power.is_none() || low_power.is_none();
-        let (lid_state, clamshell_causes_sleep) = lid.unwrap_or_else(|| (unknown(), unknown()));
+        let (lid_state, clamshell_causes_sleep, lid_sensor_absent) =
+            lid.unwrap_or_else(|| (unknown(), unknown(), false));
         let (power_source, battery_pct, battery_detail) =
             power.unwrap_or_else(|| (unknown(), None, String::new()));
         let (thermal_state, thermal_pressure, cpu_speed_limit_pct) =
             thermal.unwrap_or_else(|| (unknown(), unknown(), None));
-        let degraded = degraded || thermal_state == "unknown" || thermal_pressure == "unknown";
         let low_power_mode = low_power.unwrap_or_else(unknown);
+        let lid_degraded = lid_state == "unknown" && !lid_sensor_absent;
+        let degraded = lid_degraded
+            || power_source == "unknown"
+            || thermal_state == "unknown"
+            || thermal_pressure == "unknown"
+            || low_power_mode == "unknown";
 
         #[cfg(target_os = "macos")]
         let (memory, load_avg, uptime_seconds) = (
@@ -1029,7 +1076,7 @@ mod tests {
         let sources = ProbeSources {
             lid: || {
                 CALLS[0].fetch_add(1, Ordering::Relaxed);
-                Some(("open".into(), "no".into()))
+                Some(("open".into(), "no".into(), false))
             },
             power: || {
                 CALLS[1].fetch_add(1, Ordering::Relaxed);
@@ -1069,9 +1116,19 @@ mod tests {
     }
 
     #[test]
-    fn thermal_failure_is_unknown_and_degrades_hardware_telemetry() {
+    fn thermal_failure_and_unknown_probes_degrade_while_preserving_independent_signals() {
+        // Independent thermal sampling: pmset failure must still preserve Darwin serious pressure
+        assert_eq!(
+            sample_thermal_sources(Some("serious"), Some((false, String::new()))),
+            Some(("warn".to_string(), "serious".to_string(), None))
+        );
+        assert_eq!(
+            sample_thermal_sources(None, Some((false, String::new()))),
+            None
+        );
+
         let mut sources = ProbeSources {
-            lid: || Some(("open".into(), "yes".into())),
+            lid: || Some(("open".into(), "yes".into(), false)),
             power: || Some(("ac".into(), Some(75), String::new())),
             thermal: || None,
             low_power: || Some("0".into()),
@@ -1093,6 +1150,24 @@ mod tests {
             ))
         };
         assert_unknown(backend.collect_sources(true, &sources));
+
+        // Parsed "unknown" strings for lid/power/low_power must mark degraded: true
+        sources.thermal = || Some(resolve_thermal_status(None, None, Some("nominal"), ""));
+        sources.lid = || Some(("unknown".into(), "unknown".into(), false));
+        assert!(backend.collect_sources(true, &sources).degraded);
+
+        // Desktop Mac with valid IOPMrootDomain output lacking AppleClamshellState is NOT degraded
+        sources.lid = || probe_lid_from_ioreg(true, "+-o IOPMrootDomain  <class IOPMrootDomain>");
+        let desktop = backend.collect_sources(true, &sources);
+        assert_eq!(desktop.lid_state, "unknown");
+        assert!(!desktop.degraded);
+
+        sources.power = || Some(("unknown".into(), None, String::new()));
+        assert!(backend.collect_sources(true, &sources).degraded);
+
+        sources.power = || Some(("ac".into(), None, String::new()));
+        sources.low_power = || Some("unknown".into());
+        assert!(backend.collect_sources(true, &sources).degraded);
     }
 
     #[test]

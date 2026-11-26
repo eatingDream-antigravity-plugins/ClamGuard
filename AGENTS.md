@@ -7,7 +7,7 @@ Guidance for AI coding agents working in `mac-clamshell-mcp`. For runtime thrott
 - `src/platform/` — macOS IOKit/CoreDisplay/DisplayServices FFI (`macos.rs`, `display_ffi.rs`), lid/power/thermal probing, brightness & screen-lock primitives.
 - `src/policy.rs` — Pure profile decision matrix (`normal`, `utility`, `eco`, `strict`) and concurrency cap calculation.
 - `src/runner.rs` — `mac-clamshell-mcp run` process wrapper (`taskpolicy`, `nice`, standard job-limit env vars).
-- `src/guard.rs` & `src/launchagent.rs` — Closed-lid display thermal guard (0% backlight + sleep internal display, restore on open) and optional 24/7 LaunchAgent management.
+- `src/guard.rs` & `src/launchagent.rs` — Closed-lid display guard (sleeps display on lid close when undocked, preserves external monitors when docked, restores brightness on open) and optional 24/7 LaunchAgent management.
 - `src/mcp/` — MCP stdio JSON-RPC server (`server.rs`), telemetry (`telemetry.rs`), 3 public tools + App-only controls.
 - `src/hook.rs` — Silent (`{}`) fail-open Antigravity lifecycle hooks emitting `[mac-clamshell]` notices only when throttled.
 - `panel/` — Dark-first SEP-1865 panel (`pack.mjs` -> `panel/dist/panel.html`, kept `<45 KiB`).

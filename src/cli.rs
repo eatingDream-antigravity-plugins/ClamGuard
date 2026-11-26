@@ -249,17 +249,24 @@ fn cmd_status(args: &[String]) -> i32 {
     match lang {
         Lang::ZhCn => {
             let disp_str = if s.display.available {
-                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                if s.display.lid_closed || s.display.mode == "saved_target" {
                     let ext = if s.display.external_count > 0 {
-                        format!("（外接 {} 台）", s.display.external_count)
+                        format!("，外接 {} 台", s.display.external_count)
                     } else {
                         String::new()
                     };
+                    let panel_state = if s.display.internal_offline {
+                        "内屏已离线"
+                    } else if s.display.confirmed_asleep {
+                        "已确认熄屏"
+                    } else {
+                        "内屏仍在线"
+                    };
                     format!(
-                        "已合盖，恢复目标 {}%{ext}",
+                        "已合盖（{panel_state}{ext}），恢复目标 {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
-                } else if s.display.asleep {
+                } else if s.display.confirmed_asleep {
                     format!(
                         "已熄屏，恢复目标 {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
@@ -311,17 +318,24 @@ fn cmd_status(args: &[String]) -> i32 {
         }
         Lang::En => {
             let disp_str = if s.display.available {
-                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                if s.display.lid_closed || s.display.mode == "saved_target" {
                     let ext = if s.display.external_count > 0 {
-                        format!(" ({} external)", s.display.external_count)
+                        format!(", {} external", s.display.external_count)
                     } else {
                         String::new()
                     };
+                    let panel_state = if s.display.internal_offline {
+                        "internal offline"
+                    } else if s.display.confirmed_asleep {
+                        "confirmed asleep"
+                    } else {
+                        "internal online"
+                    };
                     format!(
-                        "closed, saved target {}%{ext}",
+                        "closed ({panel_state}{ext}), saved target {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
-                } else if s.display.asleep {
+                } else if s.display.confirmed_asleep {
                     format!(
                         "asleep, saved target {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
@@ -430,10 +444,14 @@ fn cmd_brightness(args: &[String]) -> i32 {
     let display = MacOsDisplayBackend;
 
     if subcmd == "get" {
-        let lid_str = match lid_override.or_else(|| probe.lid_closed_fast()) {
+        let hw_closed = probe.lid_closed_fast();
+        let lid_str = match lid_override {
             Some(true) => "closed",
-            Some(false) => "open",
-            None => "unknown",
+            Some(false) | None => match hw_closed {
+                Some(true) => "closed",
+                Some(false) => "open",
+                None => "unknown",
+            },
         };
         let state = load_guard_state(&data_dir);
         let info = read_display_info(&display, lid_str, &state);
@@ -443,13 +461,21 @@ fn cmd_brightness(args: &[String]) -> i32 {
                 serde_json::to_string(&info).unwrap_or_else(|_| "{}".into())
             );
         } else if info.available {
-            if lid_str == "closed" || info.mode == "saved_target" {
+            if info.lid_closed || info.mode == "saved_target" {
                 let sv = info.saved_percent.unwrap_or(20);
+                let state_note = match (lang, info.internal_offline, info.confirmed_asleep) {
+                    (Lang::ZhCn, true, _) => "内屏已离线",
+                    (Lang::ZhCn, false, true) => "已确认熄屏",
+                    (Lang::ZhCn, false, false) => "内屏仍在线",
+                    (Lang::En, true, _) => "internal offline",
+                    (Lang::En, false, true) => "confirmed asleep",
+                    (Lang::En, false, false) => "internal online",
+                };
                 match lang {
-                    Lang::ZhCn => println!("已合盖，恢复目标 {sv}%"),
-                    Lang::En => println!("closed, saved target {sv}%"),
+                    Lang::ZhCn => println!("已合盖（{state_note}），恢复目标 {sv}%"),
+                    Lang::En => println!("closed ({state_note}), saved target {sv}%"),
                 }
-            } else if info.asleep {
+            } else if info.confirmed_asleep {
                 let sv = info.saved_percent.or(info.percent).unwrap_or(20);
                 match lang {
                     Lang::ZhCn => println!("已熄屏，恢复目标 {sv}%"),
@@ -563,7 +589,10 @@ fn cmd_lock(args: &[String]) -> i32 {
     let display = MacOsDisplayBackend;
 
     match display.lock_screen_now() {
-        Ok(method) => {
+        Ok(outcome) => {
+            let method = outcome.method;
+            let verified = outcome.verified;
+            let status = if verified { "verified" } else { "submitted" };
             let locked_at_ms = now_epoch_ms() as u64;
             if json_mode {
                 println!(
@@ -571,13 +600,25 @@ fn cmd_lock(args: &[String]) -> i32 {
                     json!({
                         "ok": true,
                         "method": method,
+                        "verified": verified,
+                        "status": status,
                         "locked_at_ms": locked_at_ms
                     })
                 );
             } else {
-                match lang {
-                    Lang::ZhCn => println!("已锁屏（{method}），Mac 将保持唤醒"),
-                    Lang::En => println!("screen locked ({method}); Mac remains awake"),
+                match (lang, verified) {
+                    (Lang::ZhCn, true) => println!("已锁屏（{method}，已核验），Mac 将保持唤醒"),
+                    (Lang::ZhCn, false) => {
+                        println!("已提交锁屏请求（{method}，未核验会话锁），Mac 将保持唤醒")
+                    }
+                    (Lang::En, true) => {
+                        println!("screen locked ({method}, verified); Mac remains awake")
+                    }
+                    (Lang::En, false) => {
+                        println!(
+                            "lock screen request submitted ({method}, session lock not verified); Mac remains awake"
+                        )
+                    }
                 }
             }
             0

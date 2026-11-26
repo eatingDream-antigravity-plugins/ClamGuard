@@ -1,7 +1,7 @@
 use crate::mcp::telemetry::TelemetryEngine;
 use crate::mcp::tools::{
-    call_tool_json, list_resources_json, list_tools_json, read_resource_json, HtmlLoader, APP_MIME,
-    SERVER_NAME, SERVER_VERSION,
+    call_tool_json, is_tool_allowed, list_resources_json, list_tools_json, read_resource_json,
+    HtmlLoader, APP_MIME, SERVER_NAME, SERVER_VERSION,
 };
 use crate::platform::display_ffi::{DisplayBackend, MacOsDisplayBackend};
 use crate::platform::fan::MacOsFanSensorSource;
@@ -25,12 +25,23 @@ pub struct McpSession {
     apps_capable: bool,
 }
 
-pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
+fn invalid_request_err(message: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": { "code": -32600, "message": message }
+    })
+}
+
+fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     msg: &Value,
     session: &mut McpSession,
     engine: &Arc<TelemetryEngine<P, D>>,
     html_loader: &HtmlLoader,
 ) -> Option<Value> {
+    if !msg.is_object() {
+        return Some(invalid_request_err("Invalid Request"));
+    }
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
@@ -60,14 +71,13 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
                 .and_then(|v| v.as_str())
                 .filter(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(s))
                 .unwrap_or(LATEST_PROTOCOL_VERSION);
+            // SEP-1865 requires extensions["io.modelcontextprotocol/ui"].mimeTypes to be an array
+            // explicitly including "text/html;profile=mcp-app".
             session.apps_capable = params["capabilities"]["extensions"][UI_EXTENSION]
                 .as_object()
-                .is_some_and(|ui| match ui.get("mimeTypes") {
-                    None => true,
-                    Some(types) => types
-                        .as_array()
-                        .is_some_and(|types| types.iter().any(|v| v.as_str() == Some(APP_MIME))),
-                });
+                .and_then(|ui| ui.get("mimeTypes"))
+                .and_then(|types| types.as_array())
+                .is_some_and(|types| types.iter().any(|v| v.as_str() == Some(APP_MIME)));
             let mut capabilities = json!({"tools": {}, "resources": {}});
             if session.apps_capable {
                 capabilities["extensions"] = json!({UI_EXTENSION: {"mimeTypes": [APP_MIME]}});
@@ -93,6 +103,12 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
         "tools/list" => Some(ok(list_tools_json(session.apps_capable))),
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !is_tool_allowed(name, session.apps_capable) {
+                return Some(err(
+                    -32602,
+                    format!("Tool not available in this session: {name}"),
+                ));
+            }
             let args = params
                 .get("arguments")
                 .cloned()
@@ -100,6 +116,30 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
             Some(ok(call_tool_json(name, &args, engine)))
         }
         other => Some(err(-32601, format!("Method not found: {other}"))),
+    }
+}
+
+pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
+    msg: &Value,
+    session: &mut McpSession,
+    engine: &Arc<TelemetryEngine<P, D>>,
+    html_loader: &HtmlLoader,
+) -> Option<Value> {
+    if let Some(batch) = msg.as_array() {
+        if batch.is_empty() {
+            return Some(invalid_request_err("Invalid Request: empty batch"));
+        }
+        let responses: Vec<Value> = batch
+            .iter()
+            .filter_map(|item| handle_single_rpc(item, session, engine, html_loader))
+            .collect();
+        if responses.is_empty() {
+            None
+        } else {
+            Some(Value::Array(responses))
+        }
+    } else {
+        handle_single_rpc(msg, session, engine, html_loader)
     }
 }
 
@@ -118,34 +158,30 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
     ));
     let html_loader = Arc::new(HtmlLoader::new(panel_html_override));
 
-    // Decouple MCP server lifecycle from the standalone Display Guard daemon:
-    // if LaunchAgent or a standalone `watch --daemon` already owns the guard, run in pure
-    // observer mode (watching `display-guard-state.json` fingerprints) instead of contending
-    // in a competing `LOCK_NB` loop. Only spawn a fallback guard thread if we exclusively
-    // acquire `DaemonLock`.
+    // Decouple MCP server lifecycle from the standalone Display Guard daemon while still
+    // taking over cleanly if the LaunchAgent is unloaded or an earlier lock holder exits.
     let stop_guard = Arc::new(AtomicBool::new(false));
     let guard_interval_ms = std::env::var("MAC_CLAMSHELL_GUARD_INTERVAL_MS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_SERVE_GUARD_INTERVAL_MS)
         .clamp(100, 300_000);
-    let fallback_daemon_lock = if crate::launchagent::is_launchagent_active()
-        || crate::state::DaemonLock::is_active(&data_dir)
-    {
+    let initial_lock = if crate::launchagent::is_launchagent_active() {
         None
     } else {
         crate::state::DaemonLock::try_acquire(&data_dir)
             .ok()
             .flatten()
     };
-    let guard_handle = if let Some(daemon_lock) = fallback_daemon_lock {
+    engine.set_bg_guard_active(initial_lock.is_some());
+    let guard_handle = {
         let e = Arc::clone(&engine);
         let stop = Arc::clone(&stop_guard);
         let guard_data_dir = data_dir;
         std::thread::Builder::new()
             .name("clamshell-guard".into())
             .spawn(move || {
-                let _lock = daemon_lock;
+                let mut owned_lock = initial_lock;
                 let probe = MacOsProbeBackend::default();
                 let display = MacOsDisplayBackend;
                 let normal_dur = Duration::from_millis(guard_interval_ms);
@@ -154,22 +190,34 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
                 );
                 while !stop.load(Ordering::SeqCst) {
                     if crate::launchagent::is_launchagent_active() {
-                        // Yield cleanly if LaunchAgent was installed while MCP server was running.
+                        // Yield cleanly if LaunchAgent is loaded while MCP server is running.
+                        if owned_lock.take().is_some() {
+                            e.set_bg_guard_active(false);
+                        }
                         e.wait_guard_interval(normal_dur, &stop);
                         continue;
                     }
-                    let fast =
-                        crate::guard::run_guard_tick_locked(&guard_data_dir, &probe, &display)
-                            .map(|o| o.fast_poll)
-                            .unwrap_or(false);
-                    e.wait_guard_interval(if fast { fast_dur } else { normal_dur }, &stop);
+                    if owned_lock.is_none() {
+                        if let Ok(Some(lock)) =
+                            crate::state::DaemonLock::try_acquire(&guard_data_dir)
+                        {
+                            owned_lock = Some(lock);
+                            e.set_bg_guard_active(true);
+                        }
+                    }
+                    if owned_lock.is_some() {
+                        let fast =
+                            crate::guard::run_guard_tick_locked(&guard_data_dir, &probe, &display)
+                                .map(|o| o.fast_poll)
+                                .unwrap_or(false);
+                        e.wait_guard_interval(if fast { fast_dur } else { normal_dur }, &stop);
+                    } else {
+                        e.wait_guard_interval(normal_dur, &stop);
+                    }
                 }
             })
             .ok()
-    } else {
-        None
     };
-    engine.set_bg_guard_active(guard_handle.is_some());
 
     // Pre-warm HTML template and initial telemetry asynchronously so first open is <0.5ms.
     {
@@ -324,8 +372,13 @@ mod tests {
         fn sleep_display_now(&self) -> bool {
             true
         }
-        fn lock_screen_now(&self) -> Result<&'static str, String> {
-            Ok("mock")
+        fn lock_screen_now(
+            &self,
+        ) -> Result<crate::platform::display_ffi::LockScreenOutcome, String> {
+            Ok(crate::platform::display_ffi::LockScreenOutcome {
+                method: "mock",
+                verified: true,
+            })
         }
     }
 
@@ -373,25 +426,25 @@ mod tests {
             assert!(init["result"]["capabilities"].get("extensions").is_none());
         }
 
-        for capability in [json!({}), json!({"mimeTypes": ["text/plain", APP_MIME]})] {
-            let init = initialize(
-                &mut app,
-                json!({
-                    "capabilities": {"extensions": {UI_EXTENSION: capability}}
-                }),
-            );
-            assert_eq!(
-                init["result"]["capabilities"]["extensions"][UI_EXTENSION]["mimeTypes"],
-                json!([APP_MIME])
-            );
-            assert_eq!(
-                list_tools(&mut app)["result"]["tools"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                5
-            );
-        }
+        // SEP-1865 requires mimeTypes array explicitly containing APP_MIME.
+        let init = initialize(
+            &mut app,
+            json!({
+                "capabilities": {"extensions": {UI_EXTENSION: {"mimeTypes": ["text/plain", APP_MIME]}}}
+            }),
+        );
+        assert_eq!(
+            init["result"]["capabilities"]["extensions"][UI_EXTENSION]["mimeTypes"],
+            json!([APP_MIME])
+        );
+        assert_eq!(
+            list_tools(&mut app)["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .len(),
+            5
+        );
+
         let tools = list_tools(&mut plain);
         let names: Vec<_> = tools["result"]["tools"]
             .as_array()
@@ -407,8 +460,22 @@ mod tests {
                 "clamshell_lock_screen"
             ]
         );
+        // Plain session MUST reject app-only tools in tools/call!
+        for forbidden in ["clamshell_refresh", "clamshell_configure"] {
+            let err_resp = handle_rpc_value_with_session(
+                &json!({"id": 99, "method": "tools/call", "params": {"name": forbidden, "arguments": {}}}),
+                &mut plain,
+                &engine,
+                &html,
+            )
+            .unwrap();
+            assert_eq!(err_resp["error"]["code"], -32602);
+            assert!(err_resp.get("result").is_none());
+        }
 
+        // Empty object {} and missing/mismatched mimeTypes MUST NOT enable Apps
         for capability in [
+            json!({}),
             json!({"mimeTypes": ["text/html"]}),
             json!({"mimeTypes": null}),
             json!(null),
@@ -427,7 +494,46 @@ mod tests {
                     .len(),
                 3
             );
+            let err_resp = handle_rpc_value_with_session(
+                &json!({"id": 100, "method": "tools/call", "params": {"name": "clamshell_configure", "arguments": {"guardEnabled": false}}}),
+                &mut app,
+                &engine,
+                &html,
+            )
+            .unwrap();
+            assert_eq!(err_resp["error"]["code"], -32602);
         }
+
+        // JSON-RPC 2.0 batch handling (required for 2025-03-26)
+        let batch_resp = handle_rpc_value_with_session(
+            &json!([
+                {"jsonrpc": "2.0", "id": 10, "method": "ping"},
+                {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                {"jsonrpc": "2.0", "id": 11, "method": "ping"}
+            ]),
+            &mut plain,
+            &engine,
+            &html,
+        )
+        .unwrap();
+        let arr = batch_resp.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], 10);
+        assert_eq!(arr[0]["result"], json!({}));
+        assert_eq!(arr[1]["id"], 11);
+        assert_eq!(arr[1]["result"], json!({}));
+
+        // Notification-only batch emits no response; empty batch emits -32600
+        assert!(handle_rpc_value_with_session(
+            &json!([{"jsonrpc": "2.0", "method": "notifications/initialized"}]),
+            &mut plain,
+            &engine,
+            &html,
+        )
+        .is_none());
+        let empty_batch =
+            handle_rpc_value_with_session(&json!([]), &mut plain, &engine, &html).unwrap();
+        assert_eq!(empty_batch["error"]["code"], -32600);
     }
 
     #[test]
@@ -450,7 +556,7 @@ mod tests {
         let mut session = McpSession::default();
 
         let init = handle_rpc_value_with_session(
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"extensions":{"io.modelcontextprotocol/ui":{}}}}}),
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"extensions":{"io.modelcontextprotocol/ui":{"mimeTypes":[APP_MIME]}}}}}),
             &mut session,
             &engine,
             &html_loader,

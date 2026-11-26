@@ -207,6 +207,14 @@ pub fn read_resource_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static
     }))
 }
 
+pub fn is_tool_allowed(name: &str, apps_capable: bool) -> bool {
+    match name {
+        "clamshell_panel" | "clamshell_set_brightness" | "clamshell_lock_screen" => true,
+        "clamshell_refresh" | "clamshell_configure" => apps_capable,
+        _ => false,
+    }
+}
+
 pub fn list_tools_json(apps_capable: bool) -> Value {
     let mut result = json!({
         "tools": [
@@ -336,10 +344,12 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
             }
         ]
     });
-    if !apps_capable {
-        if let Some(tools) = result["tools"].as_array_mut() {
-            tools.retain(|tool| tool["_meta"]["ui"]["visibility"] != json!(["app"]));
-        }
+    if let Some(tools) = result["tools"].as_array_mut() {
+        tools.retain(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| is_tool_allowed(name, apps_capable))
+        });
     }
     result
 }
@@ -500,18 +510,31 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             }
         }
         "clamshell_lock_screen" => match engine.lock_screen() {
-            Ok((method, locked_at_ms, server_ms)) => {
-                let text = match engine.detect_lang() {
-                    Lang::ZhCn => format!("已锁屏（{method}），Mac 将保持唤醒以继续运行后台任务。"),
-                    Lang::En => {
-                        format!("Screen locked ({method}); Mac remains awake for background tasks.")
+            Ok((outcome, locked_at_ms, server_ms)) => {
+                let method = outcome.method;
+                let verified = outcome.verified;
+                let status = if verified { "verified" } else { "submitted" };
+                let text = match (engine.detect_lang(), verified) {
+                    (Lang::ZhCn, true) => {
+                        format!("已锁屏（{method}，已核验会话锁），Mac 将保持唤醒以继续运行后台任务。")
                     }
+                    (Lang::ZhCn, false) => {
+                        format!("已提交锁屏请求（{method}，未核验会话锁状态），Mac 将保持唤醒。")
+                    }
+                    (Lang::En, true) => format!(
+                        "Screen locked ({method}, verified); Mac remains awake for background tasks."
+                    ),
+                    (Lang::En, false) => format!(
+                        "Lock screen request submitted ({method}, session lock not verified); Mac remains awake."
+                    ),
                 };
                 json!({
                     "content": [{ "type": "text", "text": text }],
                     "structuredContent": {
                         "ok": true,
                         "method": method,
+                        "verified": verified,
+                        "status": status,
                         "locked_at_ms": locked_at_ms,
                         "serverMs": server_ms
                     }

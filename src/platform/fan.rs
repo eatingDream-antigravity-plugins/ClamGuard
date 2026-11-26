@@ -20,8 +20,11 @@ pub struct FanReading {
 pub struct FanTelemetry {
     pub status: String,
     pub fans: Vec<FanReading>,
+    pub smc_mode: String,
     pub controller: String,
     pub external_managers: Vec<String>,
+    #[serde(default)]
+    pub detected_monitors: Vec<String>,
     pub ownership_mode: String,
     pub read_only: bool,
     pub sampled_at_ms: u64,
@@ -47,14 +50,14 @@ impl FanSensorSource for MacOsFanSensorSource {
 
             #[cfg(target_os = "macos")]
             {
-                let managers = darwin::external_managers();
+                let (managers, monitors) = darwin::detected_software();
                 let sensors = darwin::Connection::open()
                     .map(|smc| smc::sample(|key| smc.read(key)))
                     .unwrap_or_default();
-                sensors.telemetry(managers)
+                sensors.telemetry(managers, monitors)
             }
             #[cfg(not(target_os = "macos"))]
-            Sensors::default().telemetry(Vec::new())
+            Sensors::default().telemetry(Vec::new(), Vec::new())
         })
     }
 }
@@ -79,19 +82,50 @@ impl FanSensorSource for TestFanSensor {
 struct Sensors {
     // None means the sensor data was unavailable. An empty Vec means FNum was zero.
     rpms: Option<Vec<u32>>,
-    manual_mask: u16,
+    force_mask: Option<u16>,
+    per_fan_manual: u16,
+    per_fan_known: u16,
     count: u8,
 }
 
 impl Sensors {
-    fn telemetry(self, mut external_managers: Vec<String>) -> FanTelemetry {
+    fn manual_mask(&self) -> u16 {
+        self.force_mask.unwrap_or(0) | self.per_fan_manual
+    }
+
+    fn smc_mode(&self, status: &str) -> &'static str {
+        if status == "fanless" {
+            return "none";
+        }
+        if self.manual_mask() != 0 {
+            return "manual";
+        }
+        let fan_count = self.count.min(MAX_FANS);
+        let all_fans_mode_known =
+            fan_count > 0 && (0..fan_count).all(|id| self.per_fan_known & (1 << id) != 0);
+        if self.force_mask == Some(0) || all_fans_mode_known {
+            "auto"
+        } else {
+            "unknown"
+        }
+    }
+
+    fn telemetry(
+        self,
+        mut external_managers: Vec<String>,
+        mut detected_monitors: Vec<String>,
+    ) -> FanTelemetry {
         external_managers.sort_unstable();
         external_managers.dedup();
+        detected_monitors.sort_unstable();
+        detected_monitors.dedup();
         let status = match self.rpms.as_deref() {
             None => "unavailable",
             Some([]) => "fanless",
             Some(_) => "ok",
         };
+        let manual_mask = self.manual_mask();
+        let smc_mode = self.smc_mode(status);
         let fans = self
             .rpms
             .unwrap_or_default()
@@ -105,28 +139,67 @@ impl Sensors {
                     _ => format!("Fan {}", id + 1),
                 },
                 rpm,
-                manual: self.manual_mask & (1 << id) != 0,
+                manual: manual_mask & (1 << id) != 0,
             })
             .collect();
-        let controller =
-            external_managers
-                .first()
-                .map(String::as_str)
-                .unwrap_or(if self.manual_mask != 0 {
-                    "Manual (SMC)"
-                } else {
-                    "System (macOS)"
-                });
-        let (ownership_mode, note) = if !external_managers.is_empty() || self.manual_mask != 0 {
-            ("yield", format!("Mac Clamshell is read-only and yields fan control to {controller} while coordinating CPU throttling and display guard."))
-        } else {
-            ("observer", "Mac Clamshell is read-only and observes macOS automatic fan control while coordinating CPU throttling and display guard.".to_string())
+
+        // Only name a specific external controller when SMC confirms manual mode and a single
+        // dedicated fan-control app is detected. Never present monitor-only apps as controllers
+        // and never assume macOS auto when SMC mode could not be read.
+        let controller = match smc_mode {
+            "manual" => match external_managers.as_slice() {
+                [single] => single.clone(),
+                [] => "Manual (SMC)".to_string(),
+                many => format!("Manual (SMC) ({})", many.join(", ")),
+            },
+            "auto" | "none" => "System (macOS)".to_string(),
+            _ => "Unknown".to_string(),
         };
+
+        let yield_mode = smc_mode == "manual" || !external_managers.is_empty();
+        let ownership_mode = if yield_mode { "yield" } else { "observer" };
+        let note = match (smc_mode, external_managers.is_empty(), detected_monitors.is_empty()) {
+            ("none", _, _) => {
+                "Mac Clamshell is read-only; no hardware fans detected (passive cooling).".to_string()
+            }
+            ("manual", false, _) => format!(
+                "Mac Clamshell is read-only (SMC mode: manual); detected fan-control software: {}.",
+                external_managers.join(", ")
+            ),
+            ("manual", true, _) => {
+                "Mac Clamshell is read-only (SMC mode: manual); yields fan control.".to_string()
+            }
+            ("auto", false, _) => format!(
+                "Mac Clamshell is read-only (SMC mode: auto); detected fan-control software: {}.",
+                external_managers.join(", ")
+            ),
+            ("auto", true, false) => format!(
+                "Mac Clamshell is read-only (SMC mode: auto); detected monitoring software: {}.",
+                detected_monitors.join(", ")
+            ),
+            ("auto", true, true) => {
+                "Mac Clamshell is read-only (SMC mode: auto) and never writes SMC fan keys.".to_string()
+            }
+            (_, false, _) => format!(
+                "Mac Clamshell is read-only (SMC mode: unknown); detected fan-control software: {}.",
+                external_managers.join(", ")
+            ),
+            (_, true, false) => format!(
+                "Mac Clamshell is read-only (SMC mode: unknown); detected monitoring software: {}.",
+                detected_monitors.join(", ")
+            ),
+            (_, true, true) => {
+                "Mac Clamshell is read-only (SMC mode: unknown) and never writes SMC fan keys.".to_string()
+            }
+        };
+
         FanTelemetry {
             status: status.to_string(),
             fans,
-            controller: controller.to_string(),
+            smc_mode: smc_mode.to_string(),
+            controller,
             external_managers,
+            detected_monitors,
             ownership_mode: ownership_mode.to_string(),
             read_only: true,
             sampled_at_ms: SystemTime::now()
@@ -141,16 +214,29 @@ impl Sensors {
 
 fn mock_sample(raw: &str) -> FanTelemetry {
     let mut managers = Vec::new();
+    let mut monitors = Vec::new();
     let mut sensors = Sensors::default();
     let speeds = if let Some(speeds) = raw.strip_prefix("active:") {
+        sensors.force_mask = Some(0);
         Some(speeds)
     } else if let Some(speeds) = raw.strip_prefix("manual:") {
-        sensors.manual_mask = 1;
+        sensors.force_mask = Some(1);
+        Some(speeds)
+    } else if let Some(speeds) = raw.strip_prefix("unknown_mode:") {
         Some(speeds)
     } else if let Some((name, speeds)) = raw.strip_prefix("yield:").and_then(|v| v.split_once(':'))
     {
+        sensors.force_mask = Some(1);
         if !name.is_empty() {
             managers.push(name.to_string());
+        }
+        Some(speeds)
+    } else if let Some((name, speeds)) =
+        raw.strip_prefix("monitor:").and_then(|v| v.split_once(':'))
+    {
+        sensors.force_mask = Some(0);
+        if !name.is_empty() {
+            monitors.push(name.to_string());
         }
         Some(speeds)
     } else {
@@ -166,23 +252,30 @@ fn mock_sample(raw: &str) -> FanTelemetry {
     } else if raw == "fanless" {
         sensors.rpms = Some(Vec::new());
     }
-    sensors.telemetry(managers)
+    sensors.telemetry(managers, monitors)
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn manager_for_process(path: &str, name: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SoftwareKind {
+    Controller,
+    Monitor,
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn classify_process(path: &str, name: &str) -> Option<(SoftwareKind, &'static str)> {
     if path.contains("/Macs Fan Control.app/") || name == "MacsFanControl" {
-        Some("Macs Fan Control")
+        Some((SoftwareKind::Controller, "Macs Fan Control"))
     } else if path.contains("/TG Pro.app/") || name == "TGPro" {
-        Some("TG Pro")
-    } else if path.contains("/Stats.app/") {
-        Some("Stats")
-    } else if path.contains("/iStat Menus") || name == "iStatMenus" {
-        Some("iStat Menus")
+        Some((SoftwareKind::Controller, "TG Pro"))
     } else if name == "smcFanControl" {
-        Some("smcFanControl")
+        Some((SoftwareKind::Controller, "smcFanControl"))
+    } else if path.contains("/Stats.app/") {
+        Some((SoftwareKind::Monitor, "Stats"))
+    } else if path.contains("/iStat Menus") || name == "iStatMenus" {
+        Some((SoftwareKind::Monitor, "iStat Menus"))
     } else if path.contains("/Fanny.app/") {
-        Some("Fanny")
+        Some((SoftwareKind::Monitor, "Fanny"))
     } else {
         None
     }
@@ -308,19 +401,28 @@ mod smc {
 
     pub(super) fn sample(mut read: impl FnMut(FanKey) -> Option<Value>) -> Sensors {
         let mut get = |key| read(key).and_then(|value| decode(key, value));
-        let mut manual_mask = match get(FanKey::ForceMask) {
-            Some(FanValue::ForceMask(mask)) => mask,
-            _ => 0,
+        let force_mask = match get(FanKey::ForceMask) {
+            Some(FanValue::ForceMask(mask)) => Some(mask),
+            _ => None,
         };
         let Some(FanValue::CountOrMode(count)) = get(FanKey::Count) else {
             return Sensors {
-                manual_mask,
+                force_mask,
                 ..Sensors::default()
             };
         };
+        let mut per_fan_manual = 0u16;
+        let mut per_fan_known = 0u16;
         for id in 0..count.min(MAX_FANS) {
-            if matches!(get(FanKey::Mode(id)), Some(FanValue::CountOrMode(1))) {
-                manual_mask |= 1 << id;
+            match get(FanKey::Mode(id)) {
+                Some(FanValue::CountOrMode(1)) => {
+                    per_fan_manual |= 1 << id;
+                    per_fan_known |= 1 << id;
+                }
+                Some(FanValue::CountOrMode(0)) => {
+                    per_fan_known |= 1 << id;
+                }
+                _ => {}
             }
         }
         let rpms = (0..count.min(MAX_FANS))
@@ -331,7 +433,9 @@ mod smc {
             .collect();
         Sensors {
             rpms,
-            manual_mask,
+            force_mask,
+            per_fan_manual,
+            per_fan_known,
             count,
         }
     }
@@ -429,8 +533,9 @@ mod smc {
                 FanKey::Count => Some(value(b"ui8 ", &[0])),
                 _ => None,
             })
-            .telemetry(Vec::new());
+            .telemetry(Vec::new(), Vec::new());
             assert_eq!(fanless.status, "fanless");
+            assert_eq!(fanless.smc_mode, "none");
 
             let dual = sample(|key| match key {
                 FanKey::Count => Some(value(b"ui8 ", &[2])),
@@ -441,8 +546,9 @@ mod smc {
                 FanKey::Actual(1) => Some(value(b"fpe2", &(2210u16 << 2).to_be_bytes())),
                 _ => panic!("key outside expected fan range"),
             })
-            .telemetry(Vec::new());
+            .telemetry(Vec::new(), Vec::new());
             assert_eq!(dual.status, "ok");
+            assert_eq!(dual.smc_mode, "manual");
             assert_eq!(dual.controller, "Manual (SMC)");
             assert_eq!(dual.ownership_mode, "yield");
             assert_eq!(
@@ -453,14 +559,39 @@ mod smc {
                 [(2140, true), (2210, true)]
             );
 
+            // Apple Silicon without FS! key: F0Md=0 & F1Md=0 confirms auto; missing both => unknown
+            let as_auto = sample(|key| match key {
+                FanKey::Count => Some(value(b"ui8 ", &[2])),
+                FanKey::ForceMask => None,
+                FanKey::Mode(0 | 1) => Some(value(b"ui8 ", &[0])),
+                FanKey::Actual(0) => Some(value(b"flt ", &2100.0f32.to_le_bytes())),
+                FanKey::Actual(1) => Some(value(b"flt ", &2200.0f32.to_le_bytes())),
+                _ => None,
+            })
+            .telemetry(Vec::new(), Vec::new());
+            assert_eq!(as_auto.smc_mode, "auto");
+            assert_eq!(as_auto.controller, "System (macOS)");
+
+            let unknown_mode = sample(|key| match key {
+                FanKey::Count => Some(value(b"ui8 ", &[2])),
+                FanKey::Actual(0) => Some(value(b"flt ", &2100.0f32.to_le_bytes())),
+                FanKey::Actual(1) => Some(value(b"flt ", &2200.0f32.to_le_bytes())),
+                _ => None,
+            })
+            .telemetry(Vec::new(), Vec::new());
+            assert_eq!(unknown_mode.status, "ok");
+            assert_eq!(unknown_mode.smc_mode, "unknown");
+            assert_eq!(unknown_mode.controller, "Unknown");
+
             for invalid in [f32::NAN, f32::INFINITY, -1.0, 15_001.0] {
                 let unavailable = sample(|key| match key {
                     FanKey::Count => Some(value(b"ui8 ", &[1])),
                     FanKey::Actual(0) => Some(value(b"flt ", &invalid.to_le_bytes())),
                     _ => None,
                 })
-                .telemetry(Vec::new());
+                .telemetry(Vec::new(), Vec::new());
                 assert_eq!(unavailable.status, "unavailable");
+                assert_eq!(unavailable.smc_mode, "unknown");
                 assert!(unavailable.read_only);
             }
         }
@@ -469,7 +600,7 @@ mod smc {
 
 #[cfg(target_os = "macos")]
 mod darwin {
-    use super::{manager_for_process, smc};
+    use super::smc;
     use std::ffi::c_void;
     use std::mem::size_of;
 
@@ -543,16 +674,16 @@ mod darwin {
         }
     }
 
-    pub(super) fn external_managers() -> Vec<String> {
+    pub(super) fn detected_software() -> (Vec<String>, Vec<String>) {
         let estimated = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
         if estimated <= 0 {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         // Allow the process table to grow between the size query and the actual read.
         let mut pids = vec![0i32; estimated as usize + 32];
         let count = loop {
             let Ok(bytes) = i32::try_from(std::mem::size_of_val(pids.as_slice())) else {
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             };
             let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) }.max(0);
             if (count as usize) < pids.len() {
@@ -562,20 +693,25 @@ mod darwin {
         };
 
         let mut managers = Vec::new();
+        let mut monitors = Vec::new();
         let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let mut push_match = |(kind, label): (super::SoftwareKind, &'static str)| match kind {
+            super::SoftwareKind::Controller => managers.push(label.to_string()),
+            super::SoftwareKind::Monitor => monitors.push(label.to_string()),
+        };
         for pid in pids.into_iter().take(count).filter(|&pid| pid > 0) {
             if let Some(path) = proc_text(pid, &mut buf, libc::proc_pidpath) {
                 let name = path.rsplit('/').next().unwrap_or_default();
-                if let Some(manager) = manager_for_process(path, name) {
-                    managers.push(manager.to_string());
+                if let Some(matched) = super::classify_process(path, name) {
+                    push_match(matched);
                 }
             } else if let Some(name) = proc_text(pid, &mut buf, libc::proc_name) {
-                if let Some(manager) = manager_for_process("", name) {
-                    managers.push(manager.to_string());
+                if let Some(matched) = super::classify_process("", name) {
+                    push_match(matched);
                 }
             }
         }
-        managers
+        (managers, monitors)
     }
 
     fn proc_text(
@@ -641,22 +777,47 @@ mod tests {
 
         let external = mock_sample("yield:Macs Fan Control:2400,2450");
         assert_eq!(external.external_managers, ["Macs Fan Control"]);
+        assert_eq!(external.smc_mode, "manual");
         assert_eq!(external.controller, "Macs Fan Control");
         assert_eq!(external.ownership_mode, "yield");
         assert!(external
             .note
-            .contains("yields fan control to Macs Fan Control"));
+            .contains("detected fan-control software: Macs Fan Control"));
 
         let manual = mock_sample("manual:2140,2210");
+        assert_eq!(manual.smc_mode, "manual");
         assert_eq!(manual.controller, "Manual (SMC)");
         assert_eq!(manual.ownership_mode, "yield");
         assert!(manual.fans[0].manual);
         assert!(!manual.fans[1].manual);
 
+        let unknown_mode = mock_sample("unknown_mode:2140,2210");
+        assert_eq!(unknown_mode.status, "ok");
+        assert_eq!(unknown_mode.smc_mode, "unknown");
+        assert_eq!(unknown_mode.controller, "Unknown");
+        assert_eq!(unknown_mode.ownership_mode, "observer");
+
+        let monitor = mock_sample("monitor:Fanny:2140,2210");
+        assert_eq!(monitor.smc_mode, "auto");
+        assert_eq!(monitor.controller, "System (macOS)");
+        assert_eq!(monitor.ownership_mode, "observer");
+        assert!(monitor.external_managers.is_empty());
+        assert_eq!(monitor.detected_monitors, ["Fanny"]);
+
         let unavailable = mock_sample("unavailable");
         assert_eq!(unavailable.status, "unavailable");
+        assert_eq!(unavailable.smc_mode, "unknown");
+        assert_eq!(unavailable.controller, "Unknown");
         assert!(unavailable.fans.is_empty());
-        for sample in [fanless, dual, external, manual, unavailable] {
+        for sample in [
+            fanless,
+            dual,
+            external,
+            manual,
+            unknown_mode,
+            monitor,
+            unavailable,
+        ] {
             assert!(sample.read_only);
             assert!(!sample.stale);
             assert!(sample.sampled_at_ms > 0);
@@ -664,8 +825,10 @@ mod tests {
     }
 
     #[test]
-    fn process_matching_uses_bundle_paths_and_deduplicates() {
-        let managers = [
+    fn process_matching_separates_controllers_from_monitors_and_unknown_smc_mode() {
+        let mut managers = Vec::new();
+        let mut monitors = Vec::new();
+        for (path, name) in [
             (
                 "/Applications/Macs Fan Control.app/Contents/MacOS/helper",
                 "",
@@ -680,26 +843,57 @@ mod tests {
             ("", "smcFanControl"),
             ("/Applications/Fanny.app/Contents/MacOS/Fanny", "Fanny"),
             ("", "Fanny"),
-        ]
-        .into_iter()
-        .filter_map(|(path, name)| manager_for_process(path, name))
-        .map(str::to_string)
-        .collect();
-        let sample = Sensors::default().telemetry(managers);
+        ] {
+            if let Some((kind, label)) = classify_process(path, name) {
+                match kind {
+                    SoftwareKind::Controller => managers.push(label.to_string()),
+                    SoftwareKind::Monitor => monitors.push(label.to_string()),
+                }
+            }
+        }
+        // When SMC mode failed to read, controller must remain "Unknown" (never Fanny or System)
+        let unknown = Sensors::default().telemetry(managers.clone(), monitors.clone());
         assert_eq!(
-            sample.external_managers,
-            [
-                "Fanny",
-                "Macs Fan Control",
-                "Stats",
-                "TG Pro",
-                "iStat Menus",
-                "smcFanControl"
-            ]
+            unknown.external_managers,
+            ["Macs Fan Control", "TG Pro", "smcFanControl"]
         );
-        assert_eq!(sample.controller, "Fanny");
-        assert_eq!(sample.status, "unavailable");
-        assert_eq!(sample.ownership_mode, "yield");
-        assert!(sample.read_only);
+        assert_eq!(unknown.detected_monitors, ["Fanny", "Stats", "iStat Menus"]);
+        assert_eq!(unknown.smc_mode, "unknown");
+        assert_eq!(unknown.controller, "Unknown");
+        assert_eq!(unknown.status, "unavailable");
+        assert_eq!(unknown.ownership_mode, "yield");
+        assert!(unknown.read_only);
+
+        // Multiple controllers + confirmed manual SMC mode lists detected controllers without picking Fanny
+        let multi_manual = Sensors {
+            rpms: Some(vec![2400, 2450]),
+            force_mask: Some(0x3),
+            count: 2,
+            ..Sensors::default()
+        }
+        .telemetry(managers, monitors.clone());
+        assert_eq!(multi_manual.smc_mode, "manual");
+        assert_eq!(
+            multi_manual.controller,
+            "Manual (SMC) (Macs Fan Control, TG Pro, smcFanControl)"
+        );
+        assert_eq!(multi_manual.ownership_mode, "yield");
+
+        // Monitor-only apps alone never claim controller or yield ownership
+        let monitor_only = Sensors {
+            rpms: Some(vec![2100]),
+            force_mask: Some(0),
+            count: 1,
+            ..Sensors::default()
+        }
+        .telemetry(Vec::new(), monitors);
+        assert_eq!(monitor_only.smc_mode, "auto");
+        assert_eq!(monitor_only.controller, "System (macOS)");
+        assert_eq!(monitor_only.ownership_mode, "observer");
+        assert!(monitor_only.external_managers.is_empty());
+        assert_eq!(
+            monitor_only.detected_monitors,
+            ["Fanny", "Stats", "iStat Menus"]
+        );
     }
 }

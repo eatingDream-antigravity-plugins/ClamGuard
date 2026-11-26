@@ -1,4 +1,5 @@
 // Pure locale, policy, topology, display-guard, and read-only fan ownership helpers.
+const SYS = "System (macOS)", MAN = "Manual (SMC)", UNK = "Unknown";
 
 export function normalizeLang(raw) {
   const s = String(raw ?? "").trim().toLowerCase();
@@ -7,24 +8,19 @@ export function normalizeLang(raw) {
 }
 
 export function resolvePanelLang({ saved, hostLocale, navLang, bootLocale } = {}) {
-  for (const src of [saved, hostLocale, navLang, bootLocale]) {
-    const n = normalizeLang(src);
-    if (n) return n;
-  }
+  for (const src of [saved, hostLocale, navLang, bootLocale]) { const n = normalizeLang(src); if (n) return n; }
   return "en";
 }
 
 export function computeOptimisticState(base, patch) {
   if (!base) return base;
-  const s = { ...base.settings, ...patch };
-  const total = Math.max(1, Number(base.cpuTopology?.total) || 8);
-  const bp = base.policy || {};
+  const s = { ...base.settings, ...patch }, total = Math.max(1, +base.cpuTopology?.total || 8), bp = base.policy || {};
   let autoProfile = bp.autoProfile || "normal";
   if (patch?.acClosedProfile && !["warn", "serious", "critical"].includes(base.thermalState) && base.lidState === "closed" && base.powerSource !== "battery") {
     autoProfile = s.acClosedProfile === "eco" ? "eco" : "utility";
   }
-  const ov = s.modeOverride || "auto", manual = ov !== "auto", profile = manual ? ov : autoProfile;
-  const pj = base.profileJobs, tj = pj ? (!manual && profile === "eco" && pj.autoEco != null ? pj.autoEco : pj[profile]) : null;
+  const ov = s.modeOverride || "auto", manual = ov !== "auto", profile = manual ? ov : autoProfile, pj = base.profileJobs;
+  const tj = pj ? (!manual && profile === "eco" && pj.autoEco != null ? pj.autoEco : pj[profile]) : null;
   const maxJobs = s.maxJobsOverride > 0 ? Math.min(s.maxJobsOverride, total) : tj ?? (profile === "strict" ? 1 : profile === "normal" ? total : bp.maxJobs || total);
   let guardStatus = base.guardStatus || "armed";
   if (s.guardEnabled === false) guardStatus = "paused";
@@ -33,38 +29,45 @@ export function computeOptimisticState(base, patch) {
 }
 
 export function describeGuardStatus(d, restorePct, lang = "en") {
-  const zh = lang === "zh-CN";
+  const b = (e, z) => (lang === "zh-CN" ? z : e);
   const st = d?.settings?.guardEnabled === false ? "paused" : d?.guardStatus || (d?.displayGuard ? "armed" : "idle");
-  if (st === "paused") return zh ? "守护已暂停" : "Guard paused";
-  if (st === "protecting") return zh ? `熄屏保护中 · 恢复 ${restorePct}%` : `Protecting · restores ${restorePct}%`;
+  if (st === "paused") return b("Guard paused", "守护已暂停");
+  if (st === "protecting") return b(`Protecting · restores ${restorePct}%`, `熄屏保护中 · 恢复 ${restorePct}%`);
   if (st === "thermal_cap") {
     const p = d?.displayGuard?.preThermalBrightness != null ? Math.round(d.displayGuard.preThermalBrightness * 100) : restorePct;
-    return zh ? `温控限亮中 · 恢复 ${p}%` : `Thermal cap · restores ${p}%`;
+    return b(`Thermal cap · restores ${p}%`, `温控限亮中 · 恢复 ${p}%`);
   }
-  return st === "armed" ? (zh ? "守护运行中" : "Guard active") : zh ? "守护待命" : "Guard idle";
+  return st === "armed" ? b("Guard active", "守护运行中") : b("Guard idle", "守护待命");
 }
 
-const rpm = (n) => Math.max(0, Math.round(Number(n) || 0)).toLocaleString("en-US");
+const rpm = (n) => Math.max(0, Math.round(+n || 0)).toLocaleString("en-US");
 
-export function describeFanState(fan, lang = "en") {
-  const zh = lang === "zh-CN", st = fan?.status || "unavailable", fs = Array.isArray(fan?.fans) ? fan.fans : [];
-  const ex = Array.isArray(fan?.externalManagers) ? fan.externalManagers : [], y = fan?.ownershipMode === "yield";
-  const rc = fan?.controller || "System (macOS)";
-  const controller = rc === "System (macOS)" ? (zh ? "系统自动 (macOS)" : rc) : rc === "Manual (SMC)" ? (zh ? "手动策略 (SMC)" : rc) : rc;
+export function describeFanState(fan, lang = "en", guardPaused = false) {
+  const b = (e, z) => (lang === "zh-CN" ? z : e), st = fan?.status || "unavailable", fs = Array.isArray(fan?.fans) ? fan.fans : [];
+  const ex = Array.isArray(fan?.externalManagers) ? fan.externalManagers : [], mon = Array.isArray(fan?.detectedMonitors) ? fan.detectedMonitors : [];
+  const y = fan?.ownershipMode === "yield", sm = fan?.smcMode || (st === "unavailable" ? "unknown" : st === "fanless" ? "none" : "auto");
+  const rc = fan?.controller || (sm === "unknown" ? UNK : SYS);
+  const base = rc === SYS ? b(SYS, "系统自动 (macOS)") : rc === MAN ? b(MAN, "手动策略 (SMC)") : rc === UNK ? b("Unknown (SMC)", "模式未知 (SMC)") : rc;
+  const controller = ex.length && (rc === SYS || rc === UNK) ? `${base} · ${ex.join(", ")}` : base;
+  const gTail = guardPaused ? b("guard paused.", "守护已暂停。") : b("guard active.", "守护运行中。");
   if (st === "fanless") {
-    return { status: st, rpmText: zh ? "无风扇（被动散热）" : "No fans (passive cooling)", showController: false, controller, badgeText: zh ? "只读监测" : "Observer", badgeKind: "in", tooltip: zh ? "无风扇被动散热" : "Passive cooling", caption: zh ? "无风扇被动散热，协同限流与熄屏守护。" : "Passive cooling — throttling & guard active." };
+    const p = b("Passive cooling", "无风扇被动散热");
+    return { status: st, rpmText: b("No fans (passive cooling)", "无风扇（被动散热）"), showController: false, controller, badgeText: b("Observer", "只读监测"), badgeKind: "in", tooltip: p, caption: `${p}${b(" — ", "；")}${gTail}` };
   }
-  const rpmText = st === "ok" && fs.length === 2
-    ? (zh ? `左 ${rpm(fs[0].rpm)} · 右 ${rpm(fs[1].rpm)} rpm` : `L ${rpm(fs[0].rpm)} · R ${rpm(fs[1].rpm)} rpm`)
-    : st === "ok" && fs.length ? `${fs.map((f) => rpm(f.rpm)).join(" · ")} rpm`
-    : zh ? "传感器不可读" : "Unavailable";
-  const badgeText = y ? (zh ? "已让位" : "Yield") : zh ? "只读监测" : "Observer";
-  const badgeKind = y ? "wn" : "in";
-  const tooltip = y ? (zh ? `只读无冲突：让位给 ${controller}` : `Read-only: yields to ${controller}`) : zh ? "只读监测：零 SMC 写入" : "Read-only: zero SMC writes";
-  const caption = st === "unavailable"
-    ? (zh ? "风扇传感器不可读；限流与守护正常。" : "Fan sensor unavailable; throttling & guard active.")
-    : y && ex.length ? (zh ? `只读模式：已让位给 ${controller}。` : `Read-only — yields to ${controller}.`)
-    : y ? (zh ? "只读模式：手动风扇，已让位控制。" : "Read-only — manual fan mode; yields control.")
-    : zh ? "只读监测 macOS 自动风扇，零写入。" : "Read-only — observes macOS auto fans (zero writes).";
-  return { status: st, rpmText, showController: true, controller, badgeText, badgeKind, tooltip, caption };
+  const rpmText = st === "ok" && fs.length === 2 ? b(`L ${rpm(fs[0].rpm)} · R ${rpm(fs[1].rpm)} rpm`, `左 ${rpm(fs[0].rpm)} · 右 ${rpm(fs[1].rpm)} rpm`)
+    : st === "ok" && fs.length ? `${fs.map((f) => rpm(f.rpm)).join(" · ")} rpm` : b("Unavailable", "传感器不可读");
+  const ro = b("Read-only", "只读"), sep = b(", ", "、");
+  const smL = sm === "manual" ? b("manual", "手动") : sm === "auto" ? b("auto", "自动") : b("unknown", "未知");
+  const caption = st === "unavailable" ? b("Sensor unavailable; ", "风扇不可读；") + gTail
+    : ex.length ? `${ro} · SMC ${smL} · ${ex.join(sep)}.`
+    : sm === "manual" ? `${ro} · SMC ${smL}.`
+    : mon.length ? `${ro} · SMC ${smL} · ${b("monitor", "监测")}: ${mon.join(sep)}.`
+    : sm === "unknown" ? `${ro} · SMC ${smL}.`
+    : b(`${ro} — macOS auto fans.`, `${ro} · macOS 自动风扇。`);
+  return {
+    status: st, rpmText, showController: true, controller,
+    badgeText: y ? b("Yield", "已让位") : b("Observer", "只读监测"), badgeKind: y ? "wn" : "in",
+    tooltip: y ? `${ro}: ${controller}` : b(`${ro}: zero SMC writes`, `${ro}：零写入`),
+    caption,
+  };
 }

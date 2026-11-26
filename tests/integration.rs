@@ -298,7 +298,7 @@ fn cli_hook_and_mcp_stdio_end_to_end() {
     assert!(panel["result"]["content"][0]["text"]
         .as_str()
         .unwrap()
-        .contains("read-only, yielding to Macs Fan Control"));
+        .contains("read-only, SMC manual, detected fan control: Macs Fan Control"));
     let hash = panel["result"]["structuredContent"]["hash"]
         .as_str()
         .unwrap()
@@ -607,11 +607,19 @@ fn concurrent_mcp_settings_updates_survive_across_processes() {
 #[test]
 fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
     let dir = temp_data_dir("fans");
-    for (mock, status, controller, ownership, expected_rpms) in [
-        ("fanless", "fanless", "System (macOS)", "observer", vec![]),
+    for (mock, status, smc_mode, controller, ownership, expected_rpms) in [
+        (
+            "fanless",
+            "fanless",
+            "none",
+            "System (macOS)",
+            "observer",
+            vec![],
+        ),
         (
             "active:2140,2210",
             "ok",
+            "auto",
             "System (macOS)",
             "observer",
             vec![2140, 2210],
@@ -619,21 +627,47 @@ fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
         (
             "yield:Macs Fan Control:2400,2450",
             "ok",
+            "manual",
             "Macs Fan Control",
             "yield",
             vec![2400, 2450],
         ),
-        ("manual:2100", "ok", "Manual (SMC)", "yield", vec![2100]),
+        (
+            "manual:2100",
+            "ok",
+            "manual",
+            "Manual (SMC)",
+            "yield",
+            vec![2100],
+        ),
+        (
+            "unknown_mode:2100,2200",
+            "ok",
+            "unknown",
+            "Unknown",
+            "observer",
+            vec![2100, 2200],
+        ),
+        (
+            "monitor:Fanny:2100",
+            "ok",
+            "auto",
+            "System (macOS)",
+            "observer",
+            vec![2100],
+        ),
         (
             "unavailable",
             "unavailable",
-            "System (macOS)",
+            "unknown",
+            "Unknown",
             "observer",
             vec![],
         ),
     ] {
         let check = |fan: &Value| {
             assert_eq!(fan["status"], status);
+            assert_eq!(fan["smcMode"], smc_mode);
             assert_eq!(fan["controller"], controller);
             assert_eq!(fan["ownershipMode"], ownership);
             assert_eq!(fan["readOnly"], true);
@@ -658,6 +692,11 @@ fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
                 assert_eq!(fan["externalManagers"], json!(["Macs Fan Control"]));
             } else {
                 assert_eq!(fan["externalManagers"], json!([]));
+            }
+            if mock.starts_with("monitor:") {
+                assert_eq!(fan["detectedMonitors"], json!(["Fanny"]));
+            } else {
+                assert_eq!(fan["detectedMonitors"], json!([]));
             }
         };
 
@@ -711,5 +750,277 @@ fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
     assert_eq!(v["thermalState"], "unknown");
     assert_eq!(v["thermalPressure"], "unknown");
     assert_eq!(v["degraded"], true);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn cli_brightness_open_override_cannot_bypass_real_lid_probe_and_docked_display_is_accurate() {
+    let dir = temp_data_dir("p1-lid-display");
+    for lid in ["unknown", "closed"] {
+        let out = mock_command(&dir, "brightness")
+            .args(["set", "85", "--lid-state", "open", "--json"])
+            .env("MAC_CLAMSHELL_MOCK_LID", lid)
+            .env("MAC_CLAMSHELL_MOCK_DISPLAY", "builtin")
+            .env("MAC_CLAMSHELL_MOCK_BRIGHTNESS", "60")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(v["applied"], false, "lid={lid} must never write hardware");
+        assert_eq!(v["deferred"], true);
+        assert_eq!(v["mode"], "saved_target");
+    }
+
+    let docked = mock_command(&dir, "status")
+        .arg("--json")
+        .env("MAC_CLAMSHELL_MOCK_LID", "closed")
+        .env("MAC_CLAMSHELL_MOCK_DISPLAY", "docked")
+        .output()
+        .unwrap();
+    assert!(docked.status.success());
+    let dv: Value = serde_json::from_slice(&docked.stdout).unwrap();
+    assert_eq!(dv["display"]["lidClosed"], true);
+    assert_eq!(dv["display"]["internalOffline"], true);
+    assert_eq!(dv["display"]["confirmedAsleep"], false);
+    assert_eq!(dv["display"]["asleep"], false);
+
+    // P2 degraded check: unknown lid/power must set degraded: true
+    let unk = mock_command(&dir, "status")
+        .arg("--json")
+        .env("MAC_CLAMSHELL_MOCK_LID", "unknown")
+        .env("MAC_CLAMSHELL_MOCK_POWER", "unknown")
+        .output()
+        .unwrap();
+    assert!(unk.status.success());
+    let uv: Value = serde_json::from_slice(&unk.stdout).unwrap();
+    assert_eq!(uv["degraded"], true);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn mcp_enforces_session_tools_strict_apps_batching_and_lock_verification_status() {
+    let dir = temp_data_dir("p1-mcp-proto");
+
+    // 1. Plain session & empty ui extension `{}` reject app-only tools in tools/call
+    for caps in [json!({}), json!({"extensions": {UI_EXTENSION: {}}})] {
+        let responses = mcp_batch(
+            mock_command(&dir, "serve"),
+            &[
+                (
+                    "initialize",
+                    json!({"protocolVersion": "2025-03-26", "capabilities": caps}),
+                ),
+                ("tools/list", json!({})),
+                (
+                    "tools/call",
+                    json!({"name": "clamshell_configure", "arguments": {"guardEnabled": false}}),
+                ),
+                (
+                    "tools/call",
+                    json!({"name": "clamshell_refresh", "arguments": {}}),
+                ),
+            ],
+        );
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2025-03-26");
+        assert!(responses[0]["result"]["capabilities"]
+            .get("extensions")
+            .is_none());
+        assert_eq!(responses[1]["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(responses[2]["error"]["code"], -32602);
+        assert_eq!(responses[3]["error"]["code"], -32602);
+        assert!(
+            !dir.join("settings.json").exists(),
+            "rejected configure must not write settings"
+        );
+    }
+
+    // 2. JSON-RPC 2.0 batching for 2025-03-26 over live stdio transport
+    let mut child = mock_command(&dir, "serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        json!([
+            {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 3, "method": "ping"}
+        ])
+    )
+    .unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let lines: Vec<Value> = BufReader::new(out.stdout.as_slice())
+        .lines()
+        .map(|l| serde_json::from_str(&l.unwrap()).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let batch = lines[1].as_array().unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0]["id"], 2);
+    assert_eq!(batch[1]["id"], 3);
+
+    // 3. P1 #11 lock screen verified vs submitted reporting in CLI and MCP
+    for (mode, expected_verified, expected_status) in [
+        ("sac_locked", true, "verified"),
+        ("sac_submitted", false, "submitted"),
+    ] {
+        let cli = mock_command(&dir, "lock")
+            .arg("--json")
+            .env("MAC_CLAMSHELL_MOCK_DISPLAY", mode)
+            .output()
+            .unwrap();
+        assert!(cli.status.success());
+        let cv: Value = serde_json::from_slice(&cli.stdout).unwrap();
+        assert_eq!(cv["ok"], true);
+        assert_eq!(cv["method"], "SACLockScreenImmediate");
+        assert_eq!(cv["verified"], expected_verified);
+        assert_eq!(cv["status"], expected_status);
+
+        let mut cmd = mock_command(&dir, "serve");
+        cmd.env("MAC_CLAMSHELL_MOCK_DISPLAY", mode);
+        let resps = mcp_batch(
+            cmd,
+            &[
+                ("initialize", json!({"protocolVersion": "2025-11-25"})),
+                (
+                    "tools/call",
+                    json!({"name": "clamshell_lock_screen", "arguments": {}}),
+                ),
+            ],
+        );
+        let sc = &resps[1]["result"]["structuredContent"];
+        assert_eq!(sc["ok"], true);
+        assert_eq!(sc["verified"], expected_verified);
+        assert_eq!(sc["status"], expected_status);
+    }
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn surviving_mcp_server_takes_over_daemon_lock_and_unloaded_plist_reports_idle() {
+    let dir = temp_data_dir("p1-takeover");
+
+    // 1. Unloaded plist on disk alone must NOT cause guardStatus=armed/protecting
+    let agents = dir.join("agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(
+        agents.join("dev.mac-clamshell-mcp.display-guard.plist"),
+        "<plist/>",
+    )
+    .unwrap();
+    let unloaded = Command::new(bin_path())
+        .args(["status", "--json", "--data-dir"])
+        .arg(&dir)
+        .env("MAC_CLAMSHELL_LAUNCHAGENTS_DIR", &agents)
+        .env("MAC_CLAMSHELL_MOCK_LAUNCHCTL", "unloaded")
+        .env("MAC_CLAMSHELL_MOCK_LID", "open")
+        .env("MAC_CLAMSHELL_MOCK_POWER", "ac")
+        .env("MAC_CLAMSHELL_MOCK_BATT", "88")
+        .env("MAC_CLAMSHELL_MOCK_THERM", "ok")
+        .env("MAC_CLAMSHELL_MOCK_DISPLAY", "builtin")
+        .env("MAC_CLAMSHELL_MOCK_FAN", "fanless")
+        .output()
+        .unwrap();
+    assert!(unloaded.status.success());
+    let uv: Value = serde_json::from_slice(&unloaded.stdout).unwrap();
+    assert_eq!(
+        uv["guardStatus"], "idle",
+        "unloaded plist without live launchd job or DaemonLock must report idle"
+    );
+    fs::remove_dir_all(&agents).unwrap();
+
+    // 2. Two live serve processes sharing data_dir: when holder A exits, survivor B takes over
+    let mut proc_a = mock_command(&dir, "serve")
+        .env("MAC_CLAMSHELL_GUARD_INTERVAL_MS", "100")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin_a = proc_a.stdin.take().unwrap();
+    let mut out_a = BufReader::new(proc_a.stdout.take().unwrap());
+    writeln!(
+        stdin_a,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
+    )
+    .unwrap();
+    stdin_a.flush().unwrap();
+    let mut line = String::new();
+    out_a.read_line(&mut line).unwrap();
+
+    let mut proc_b = mock_command(&dir, "serve")
+        .env("MAC_CLAMSHELL_GUARD_INTERVAL_MS", "100")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin_b = proc_b.stdin.take().unwrap();
+    let mut out_b = BufReader::new(proc_b.stdout.take().unwrap());
+    writeln!(
+        stdin_b,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}})
+    )
+    .unwrap();
+    stdin_b.flush().unwrap();
+    line.clear();
+    out_b.read_line(&mut line).unwrap();
+
+    // Exit A so DaemonLock becomes free; B should take over within a few hundred ms
+    drop(stdin_a);
+    let _ = proc_a.wait();
+
+    let lock_path = dir.join("display-guard-daemon.lock");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut taken_over = false;
+    while Instant::now() < deadline {
+        if let Ok(f) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                taken_over = true;
+                break;
+            }
+            unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        taken_over,
+        "surviving MCP server B must re-acquire DaemonLock after holder A exits"
+    );
+
+    writeln!(
+        stdin_b,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "clamshell_panel", "arguments": {"fresh": true}}})
+    )
+    .unwrap();
+    stdin_b.flush().unwrap();
+    line.clear();
+    out_b.read_line(&mut line).unwrap();
+    let panel_b: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        panel_b["result"]["structuredContent"]["guardStatus"],
+        "armed"
+    );
+
+    drop(stdin_b);
+    let _ = proc_b.wait();
     fs::remove_dir_all(dir).unwrap();
 }

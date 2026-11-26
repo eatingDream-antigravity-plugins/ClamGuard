@@ -58,6 +58,9 @@ pub fn guard_is_open_restoring(state: &GuardState, now: f64) -> bool {
 pub struct DisplayInfo {
     pub available: bool,
     pub asleep: bool,
+    pub lid_closed: bool,
+    pub internal_offline: bool,
+    pub confirmed_asleep: bool,
     pub percent: Option<u8>,
     pub saved_percent: Option<u8>,
     pub builtin_count: usize,
@@ -84,12 +87,15 @@ pub fn read_display_info(
 ) -> DisplayInfo {
     let closed = lid_state == "closed";
     let (builtins, externals) = display.get_displays();
-    let (cur_pct, hw_asleep) = if let Some(&primary) = builtins.first() {
+    let internal_offline = builtins.is_empty();
+    let (cur_pct, confirmed_asleep) = if let Some(&primary) = builtins.first() {
         let cur = display.get_brightness(primary).and_then(level_to_percent);
-        let slp = display.is_asleep(primary).unwrap_or(false);
+        let slp = builtins
+            .iter()
+            .all(|&id| display.is_asleep(id) == Some(true));
         (cur, slp)
     } else {
-        (None, closed)
+        (None, false)
     };
 
     let mut saved_percent = level_f64_to_percent(guard_state.user_intent.saved_brightness);
@@ -107,21 +113,19 @@ pub fn read_display_info(
         }
     }
 
-    // In docked clamshell mode (lid closed + external monitor), macOS WindowServer takes the
-    // internal panel offline (`builtins.is_empty()`), while `lid_state == "closed"` confirms
-    // this is a clamshell MacBook whose saved restore target remains valid and editable.
-    let available = closed || (!builtins.is_empty() && (cur_pct.is_some() || hw_asleep));
-    let asleep = if closed { true } else { hw_asleep };
-    let percent = if closed {
-        Some(cur_pct.unwrap_or(0))
-    } else {
-        cur_pct
-    };
+    // Distinguish lidClosed, internalOffline, and confirmedAsleep accurately:
+    // - In docked clamshell (lid closed + external monitor), macOS WindowServer usually takes
+    //   the internal panel offline (`internal_offline = true`, `confirmed_asleep = false`).
+    // - If an internal panel remains online while closed, only report `confirmed_asleep: true`
+    //   and `asleep: true` when CoreGraphics actually confirms every built-in display is asleep.
+    let available = closed || (!internal_offline && (cur_pct.is_some() || confirmed_asleep));
+    let asleep = confirmed_asleep;
+    let percent = cur_pct;
     let mode = if !available {
         "unavailable"
     } else if closed {
         "saved_target"
-    } else if asleep {
+    } else if confirmed_asleep {
         "asleep"
     } else {
         "live"
@@ -131,6 +135,9 @@ pub fn read_display_info(
     DisplayInfo {
         available,
         asleep,
+        lid_closed: closed,
+        internal_offline,
+        confirmed_asleep,
         percent,
         saved_percent,
         builtin_count: builtins.len(),
@@ -177,7 +184,7 @@ pub fn apply_user_brightness_with_thermal(
                     .and_then(|&id| display.get_brightness(id))
                     .and_then(level_to_percent),
                 saved_percent: target_pct,
-                asleep: closed == Some(true) || sleep_states.contains(&Some(true)),
+                asleep: !builtins.is_empty() && sleep_states.iter().all(|&s| s == Some(true)),
             },
         ));
     }
@@ -258,6 +265,8 @@ pub fn evaluate_guard_tick_plan(
     let prev_lid = next.machine.last_lid.clone();
     let needs_restore = next.machine.needs_restore;
     let high_thermal = matches!(thermal_pressure, "serious" | "critical");
+    let thermal_cooled = matches!(thermal_pressure, "nominal" | "fair");
+    let thermal_unknown = !high_thermal && !thermal_cooled;
     let want_thermal_cap = !is_closed && high_thermal && (1..=100).contains(&thermal_cap_pct);
 
     let (builtins, externals) = display.get_displays();
@@ -316,8 +325,8 @@ pub fn evaluate_guard_tick_plan(
         };
     }
 
-    // Lid is OPEN: clear any stale thermal override once thermal pressure has cooled down.
-    if !high_thermal && next.user_intent.user_override_thermal {
+    // Lid is OPEN: clear any stale thermal override ONLY once thermal pressure is confirmed cooled.
+    if thermal_cooled && next.user_intent.user_override_thermal {
         next.user_intent.user_override_thermal = false;
         next.machine.thermal_capped = false;
         next.machine.pre_thermal_brightness = None;
@@ -476,9 +485,13 @@ pub fn evaluate_guard_tick_plan(
             // overwriting the user's brightness.
             next.machine.thermal_capped = false;
             next.machine.pre_thermal_brightness = None;
+        } else if thermal_unknown && thermal_cap_pct > 0 {
+            // Fail-safe: when thermal pressure probe is unknown/degraded, keep the active
+            // thermal cap and pre-thermal restore target intact until cool-down is confirmed
+            // or the user explicitly disables thermal_cap_pct.
         } else if !builtins.is_empty() {
-            // Cooled down (or thermal cap disabled): only clear thermal_capped once an online,
-            // awake built-in display actually receives the restored brightness.
+            // Confirmed cooled down (or thermal cap disabled): only clear thermal_capped once an
+            // online, awake built-in display actually receives the restored brightness.
             let restore_level = next
                 .machine
                 .pre_thermal_brightness
@@ -597,7 +610,14 @@ pub fn set_brightness_synced(
         .map_err(|e| format!("failed to acquire display-guard lock: {e}"))?;
     let state = load_guard_state(data_dir);
     let pressure = probe.thermal_pressure_fast();
-    let closed = lid_override.or_else(|| probe.lid_closed_fast());
+    // Always probe real hardware lid state inside FileLock before any hardware brightness write.
+    // `--lid-state closed` (Some(true)) may force a safe deferred write, but `--lid-state open`
+    // (Some(false)) can NEVER bypass the real hardware lid check.
+    let hw_closed = probe.lid_closed_fast();
+    let closed = match lid_override {
+        Some(true) => Some(true),
+        Some(false) | None => hw_closed,
+    };
     let (next, changed, action) =
         apply_user_brightness_with_thermal(percent, closed, &pressure, &state, display)?;
     if changed {
@@ -778,8 +798,13 @@ mod tests {
             *self.asleep.lock().unwrap() = Some(true);
             true
         }
-        fn lock_screen_now(&self) -> Result<&'static str, String> {
-            Ok("mock")
+        fn lock_screen_now(
+            &self,
+        ) -> Result<crate::platform::display_ffi::LockScreenOutcome, String> {
+            Ok(crate::platform::display_ffi::LockScreenOutcome {
+                method: "mock",
+                verified: true,
+            })
         }
     }
 
@@ -856,11 +881,17 @@ mod tests {
         assert_eq!(*display.writes.lock().unwrap(), [(1, 0.37)]);
         assert!(!load_guard_state(&dir).user_intent.user_target);
 
-        // An explicit override skips the lid probe, but still requires an awake display.
-        let override_probe = LidProbe(|| panic!("explicit lid override must skip probing"));
+        // `--lid-state open` (Some(false)) still probes hardware and only applies when
+        // hardware confirms open + display awake; `--lid-state closed` forces safe deferral.
         let action =
-            set_brightness_synced(&dir, 50.0, Some(false), &override_probe, &display).unwrap();
+            set_brightness_synced(&dir, 50.0, Some(false), &LidProbe(|| Some(false)), &display)
+                .unwrap();
         assert!(action.applied);
+        let deferred =
+            set_brightness_synced(&dir, 60.0, Some(true), &LidProbe(|| Some(false)), &display)
+                .unwrap();
+        assert!(!deferred.applied);
+        assert!(deferred.deferred);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1277,8 +1308,13 @@ mod tests {
                     .store(acquired, Ordering::SeqCst);
                 true
             }
-            fn lock_screen_now(&self) -> Result<&'static str, String> {
-                Ok("mock")
+            fn lock_screen_now(
+                &self,
+            ) -> Result<crate::platform::display_ffi::LockScreenOutcome, String> {
+                Ok(crate::platform::display_ffi::LockScreenOutcome {
+                    method: "mock",
+                    verified: true,
+                })
             }
         }
 
@@ -1301,6 +1337,100 @@ mod tests {
             lock_free.load(Ordering::SeqCst),
             "FileLock MUST be released before invoking pmset displaysleepnow"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_open_override_cannot_bypass_real_lid_probe_and_unknown_thermal_preserves_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "mac-clamshell-p1-regressions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let disp = MockDisplay::new(0.7, false);
+
+        // P1 #1: --lid-state open (Some(false)) MUST still probe hardware lid inside FileLock.
+        let unknown_lid_probe = LidProbe(|| None);
+        let act_unknown =
+            set_brightness_synced(&dir, 90.0, Some(false), &unknown_lid_probe, &disp).unwrap();
+        assert!(!act_unknown.applied);
+        assert!(act_unknown.deferred);
+        assert_eq!(act_unknown.mode, "saved_target");
+        assert!(disp.writes.lock().unwrap().is_empty());
+
+        let closed_lid_probe = LidProbe(|| Some(true));
+        let act_closed =
+            set_brightness_synced(&dir, 85.0, Some(false), &closed_lid_probe, &disp).unwrap();
+        assert!(!act_closed.applied);
+        assert!(act_closed.deferred);
+        assert_eq!(act_closed.mode, "saved_target");
+        assert!(disp.writes.lock().unwrap().is_empty());
+
+        let open_lid_probe = LidProbe(|| Some(false));
+        let act_open =
+            set_brightness_synced(&dir, 55.0, Some(false), &open_lid_probe, &disp).unwrap();
+        assert!(act_open.applied);
+        assert!(!act_open.deferred);
+        assert_eq!(act_open.mode, "applied");
+        assert_eq!(disp.writes.lock().unwrap().len(), 1);
+
+        // P1 #2: unknown thermal pressure preserves active thermal_capped & pre_thermal_brightness
+        *disp.brightness.lock().unwrap() = Some(0.85);
+        let (st_cap, _) = evaluate_guard_tick_with_thermal(
+            Some(false),
+            "serious",
+            40,
+            &GuardState::default(),
+            100.0,
+            &disp,
+        );
+        assert!(st_cap.machine.thermal_capped);
+        assert_eq!(st_cap.machine.pre_thermal_brightness, Some(0.85));
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.40).abs() < 0.005);
+
+        let (st_unk, changed_unk) =
+            evaluate_guard_tick_with_thermal(Some(false), "unknown", 40, &st_cap, 110.0, &disp);
+        assert!(!changed_unk);
+        assert!(st_unk.machine.thermal_capped);
+        assert_eq!(st_unk.machine.pre_thermal_brightness, Some(0.85));
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.40).abs() < 0.005);
+
+        // Explicitly disabling thermal_cap_pct (0) restores even while thermal is unknown
+        let (st_disabled, changed_dis) =
+            evaluate_guard_tick_with_thermal(Some(false), "unknown", 0, &st_unk, 120.0, &disp);
+        assert!(changed_dis);
+        assert!(!st_disabled.machine.thermal_capped);
+        assert_eq!(st_disabled.machine.pre_thermal_brightness, None);
+        assert!((disp.brightness.lock().unwrap().unwrap() - 0.85).abs() < 0.005);
+
+        // P1 #4: closed lid + external display distinguishes lidClosed, internalOffline, confirmedAsleep
+        *disp.externals.lock().unwrap() = vec![2];
+        *disp.builtins.lock().unwrap() = vec![1];
+        *disp.asleep.lock().unwrap() = Some(false);
+        *disp.brightness.lock().unwrap() = Some(0.65);
+        let online_closed = read_display_info(&disp, "closed", &GuardState::default());
+        assert!(online_closed.lid_closed);
+        assert!(!online_closed.internal_offline);
+        assert!(!online_closed.confirmed_asleep);
+        assert!(!online_closed.asleep);
+        assert_eq!(online_closed.percent, Some(65));
+
+        disp.builtins.lock().unwrap().clear();
+        let offline_closed = read_display_info(&disp, "closed", &GuardState::default());
+        assert!(offline_closed.lid_closed);
+        assert!(offline_closed.internal_offline);
+        assert!(!offline_closed.confirmed_asleep);
+        assert!(!offline_closed.asleep);
+        assert_eq!(offline_closed.percent, None);
+
+        *disp.builtins.lock().unwrap() = vec![1];
+        *disp.asleep.lock().unwrap() = Some(true);
+        let asleep_closed = read_display_info(&disp, "closed", &GuardState::default());
+        assert!(asleep_closed.lid_closed);
+        assert!(!asleep_closed.internal_offline);
+        assert!(asleep_closed.confirmed_asleep);
+        assert!(asleep_closed.asleep);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

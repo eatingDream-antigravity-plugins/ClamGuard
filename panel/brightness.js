@@ -13,9 +13,9 @@ export function createBrightnessController({
     busy = true; onSyncChange(true);
     try {
       while (!dead && pend !== null) {
-        const t = pend, s = seq; pend = null;
+        clr(); const t = pend, s = seq; pend = null;
         try { const r = await setter(t); if (!dead && s === seq && pend === null) onCommit(r, t); }
-        catch (e) { if (!dead && s === seq && pend === null) onRollback(e, t); break; }
+        catch (e) { if (dead) break; if (pend !== null) continue; if (s === seq) onRollback(e, t); break; }
       }
     } finally { busy = false; if (!dead) onSyncChange(pend !== null); }
   }

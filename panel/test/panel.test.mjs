@@ -289,6 +289,21 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     resolvers.shift().reject(new Error("boom"));
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(rollbacks, ["boom"]);
+    assert.equal(ctrl.isSyncing(), false);
+
+    // P1 #9: if an older in-flight write fails while a newer target is queued,
+    // the newer target MUST still be flushed and committed without stranding isSyncing().
+    ctrl.schedule(20, { immediate: true });
+    ctrl.schedule(80, { immediate: true });
+    assert.deepEqual(sent.slice(-1), [20]);
+    resolvers.shift().reject(new Error("stale-fail"));
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(sent.slice(-2), [20, 80]);
+    assert.deepEqual(rollbacks, ["boom"]);
+    resolvers.shift().resolve({ ok: true });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(committed[committed.length - 1].p, 80);
+    assert.equal(ctrl.isSyncing(), false);
     ctrl.destroy();
   });
 
@@ -499,7 +514,15 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
           setImmediate(() =>
             emitWin("message", {
               source: fakeParent,
-              data: { jsonrpc: "2.0", id: msg.id, result: { hostCapabilities: {}, hostContext: { theme: "dark" } } },
+              data: {
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: {
+                  protocolVersion: "2026-01-26",
+                  hostCapabilities: { serverTools: {} },
+                  hostContext: { theme: "dark" },
+                },
+              },
             })
           );
         } else if (msg.method === "tools/call") {
@@ -520,7 +543,7 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
           }
           let structuredContent = nextPollPayload;
           if (msg.params.name === "clamshell_lock_screen") {
-            structuredContent = { ok: true, method: "SACLockScreenImmediate", locked_at_ms: 1700000000000, serverMs: 1 };
+            structuredContent = { ok: true, method: "SACLockScreenImmediate", verified: true, status: "verified", locked_at_ms: 1700000000000, serverMs: 1 };
           }
           setImmediate(() =>
             emitWin("message", {
@@ -720,7 +743,16 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     }
     assert.equal(byId.get("bnr").hidden, false, "disconnected banner must show after 3 failures");
     assert.equal(byId.get("bnr").getAttribute("data-k"), "wn");
+    assert.equal(byId.get("hd").getAttribute("data-st"), "err", "header dot must reflect disconnected state");
     assert.ok(byId.get("bnr-t").textContent.includes("Connection lost"));
+
+    // Turning off auto-refresh updates chip label and stops promising auto-retry in banner
+    const autoChip = byId.get("auto-chip");
+    autoChip.setAttribute("data-a", "auto");
+    appRoot.dispatch("click", { target: { closest: () => autoChip } });
+    assert.equal(byId.get("auto-lbl").textContent, "Auto off");
+    assert.ok(byId.get("bnr-t").textContent.includes("auto off"));
+    appRoot.dispatch("click", { target: { closest: () => autoChip } });
 
     failNextRefresh = false;
     nextPollPayload = { unchanged: true, hash: "h2b", timestamp: "2026-01-01T00:00:30Z", serverMs: 2 };
@@ -808,6 +840,155 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     assert.equal(ioDisconnected, true);
   });
 
+  it("recovers handshake on Retry after init failure and gates tool controls on serverTools", async () => {
+    const html = fs.readFileSync(path.join(PANEL_DIR, "dist", "panel.html"), "utf8");
+    const m = html.match(/<script>([\s\S]+)<\/script>/);
+    assert.ok(m);
+
+    const runPanelHarness = async ({ initResponder, bootOverride }) => {
+      const byId = new Map();
+      const mkEl = (id = "", attrs = {}) => {
+        const attrMap = new Map(Object.entries(attrs));
+        let textVal = "";
+        const listeners = new Map();
+        const el = {
+          id, disabled: false, hidden: false, tabIndex: 0, className: "", title: "",
+          style: { setProperty() {}, backgroundColor: "", colorScheme: "", width: "" },
+          lastElementChild: null,
+          get textContent() { return textVal; },
+          set textContent(v) { textVal = String(v); },
+          setAttribute(k, v) { attrMap.set(k, String(v)); },
+          getAttribute(k) { return attrMap.has(k) ? attrMap.get(k) : null; },
+          removeAttribute(k) { attrMap.delete(k); },
+          appendChild(c) { return c; },
+          replaceChildren() {},
+          addEventListener(t, fn) { if (!listeners.has(t)) listeners.set(t, []); listeners.get(t).push(fn); },
+          removeEventListener(t, fn) { listeners.set(t, (listeners.get(t) || []).filter((f) => f !== fn)); },
+          dispatch(t, ev) { for (const fn of listeners.get(t) || []) fn(ev); },
+          querySelector: () => null,
+          querySelectorAll: () => [],
+          getBoundingClientRect: () => ({ width: 380, height: 600, left: 0 }),
+        };
+        if (id) byId.set(id, el);
+        return el;
+      };
+      const appRoot = mkEl("app");
+      for (const id of [
+        "shell", "emp", "emp-msg", "emp-btn", "swp", "hd", "hs", "fb", "fb-p", "fb-d", "fb-t", "fb-r",
+        "auto-chip", "auto-lbl", "lang-grp", "refresh-btn", "bnr", "bnr-t", "bnr-act", "bnr-x",
+        "k0", "h-lid-d", "h-lid", "k1", "h-pwr-d", "h-pwr", "hbb", "hbf", "k2", "h-thm-d", "h-thm", "k3", "h-grd-d", "h-grd",
+        "k4", "bt", "bv", "bright-track", "prs-grp", "bc", "k5", "gs", "guard-btn", "lock-btn", "k6",
+        "k7", "mb", "mode-rail", "k8", "ar", "jd", "sv", "ji", "fan-card", "k9", "frpm", "fth", "frow2", "ka", "fctrl", "fown", "fcap",
+        "diag-tray", "kb", "tp", "kc", "dmu", "dmt", "dmf", "dc", "kd", "dld", "dsp", "ds", "dlm", "ke", "ac-grp", "de", "dh", "dhi", "ht", "ft",
+      ]) mkEl(id);
+      byId.get("bnr-act").setAttribute("data-a", "bnr-retry");
+      byId.get("lock-btn").setAttribute("data-a", "lock");
+      byId.get("guard-btn").setAttribute("data-a", "guard");
+      byId.get("auto-chip").lastElementChild = byId.get("auto-lbl");
+
+      const winListeners = new Map();
+      const emitWin = (type, ev) => { for (const fn of winListeners.get(type) || []) fn(ev); };
+      const calls = [];
+      let initCount = 0;
+      const fakeParent = {
+        postMessage(msg) {
+          if (msg.method === "ui/initialize") {
+            initCount += 1;
+            const reply = initResponder(initCount, msg);
+            setImmediate(() => emitWin("message", { source: fakeParent, data: reply }));
+          } else if (msg.method === "tools/call") {
+            calls.push(msg.params.name);
+            setImmediate(() =>
+              emitWin("message", {
+                source: fakeParent,
+                data: {
+                  jsonrpc: "2.0",
+                  id: msg.id,
+                  result: {
+                    content: [{ type: "text", text: "ok" }],
+                    structuredContent: { unchanged: true, hash: "h1", timestamp: "2026-01-01T00:00:05Z", serverMs: 1 },
+                  },
+                },
+              })
+            );
+          }
+        },
+      };
+      const ctx = {
+        window: {
+          parent: fakeParent, innerWidth: 400, __MAC_CLAMSHELL_BOOT__: bootOverride,
+          addEventListener(t, fn) { if (!winListeners.has(t)) winListeners.set(t, []); winListeners.get(t).push(fn); },
+          removeEventListener(t, fn) { winListeners.set(t, (winListeners.get(t) || []).filter((f) => f !== fn)); },
+        },
+        document: {
+          documentElement: mkEl("__html"), body: mkEl("__body"), hidden: false,
+          getElementById: (id) => byId.get(id) || null, querySelector: () => null,
+          createElement: (tag) => mkEl("", { _tag: tag }), createTextNode: (t) => ({ textContent: String(t) }),
+          addEventListener() {}, removeEventListener() {},
+        },
+        navigator: { language: "en-US" },
+        performance: { now: () => 1000 },
+        Date, setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: (fn) => fn(), console,
+      };
+      ctx.globalThis = ctx;
+      vm.runInNewContext(m[1], ctx);
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      return { byId, appRoot, calls, getInitCount: () => initCount };
+    };
+
+    const boot = {
+      timestamp: "2026-01-01T00:00:00Z", locale: "en", lidState: "open", powerSource: "ac", batteryPct: 90,
+      thermalState: "ok", thermalPressure: "nominal", cpuTopology: { total: 8, performanceCores: 4, efficiencyCores: 4 },
+      host: { hostname: "mbp", chip: "Apple M3", macosVersion: "15.4", uptimeSeconds: 600, loadAvg: [1, 1, 1], memory: { usedGb: 8, totalGb: 16, compressedGb: 1, usedPct: 50 } },
+      settings: { modeOverride: "auto", maxJobsOverride: 0, guardEnabled: true, acClosedProfile: "utility" },
+      policy: { profile: "normal", modeSource: "auto", maxJobs: 8, niceLevel: 0 },
+      display: { available: true, percent: 60, savedPercent: 60, asleep: false },
+      fan: { status: "fanless", fans: [], smcMode: "none", controller: "System (macOS)", externalManagers: [], ownershipMode: "observer", readOnly: true },
+      guardStatus: "armed", hash: "h1",
+    };
+
+    // Part A: Initial handshake fails (bad protocolVersion), Retry re-runs ui/initialize and recovers!
+    const retryRun = await runPanelHarness({
+      bootOverride: boot,
+      initResponder: (n, msg) =>
+        n === 1
+          ? { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-01-01", hostCapabilities: { serverTools: {} }, hostContext: { theme: "dark" } } }
+          : { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2026-01-26", hostCapabilities: { serverTools: {} }, hostContext: { theme: "dark" } } },
+    });
+    assert.equal(retryRun.getInitCount(), 1);
+    assert.equal(retryRun.byId.get("bnr").hidden, false);
+    assert.equal(retryRun.byId.get("hd").getAttribute("data-st"), "err");
+    assert.equal(retryRun.byId.get("lock-btn").disabled, true);
+    assert.equal(retryRun.calls.length, 0);
+
+    retryRun.appRoot.dispatch("click", { target: { closest: () => retryRun.byId.get("bnr-act") } });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(retryRun.getInitCount(), 2, "Retry must re-run ui/initialize with message listener reattached");
+    assert.equal(retryRun.byId.get("bnr").hidden, true);
+    assert.equal(retryRun.byId.get("lock-btn").disabled, false);
+    assert.deepEqual(retryRun.calls, ["clamshell_refresh"]);
+
+    // Part B: Host omits serverTools -> keep boot display data, disable tool controls, send zero tools/call
+    const roRun = await runPanelHarness({
+      bootOverride: boot,
+      initResponder: (_n, msg) => ({
+        jsonrpc: "2.0",
+        id: msg.id,
+        result: { protocolVersion: "2026-01-26", hostCapabilities: {}, hostContext: { theme: "dark" } },
+      }),
+    });
+    assert.equal(roRun.byId.get("h-lid").textContent, "Open");
+    assert.equal(roRun.byId.get("bv").textContent, "60%");
+    assert.equal(roRun.byId.get("lock-btn").disabled, true);
+    assert.equal(roRun.byId.get("guard-btn").disabled, true);
+    assert.equal(roRun.byId.get("refresh-btn").disabled, true);
+    assert.equal(roRun.byId.get("bright-track").getAttribute("aria-disabled"), "true");
+    assert.equal(roRun.calls.length, 0);
+  });
+
   it("resolves bilingual panel language, guard status, optimistic state, and all 4 read-only fan states", () => {
     assert.equal(resolvePanelLang({ saved: "zh-CN", hostLocale: "en-US" }), "zh-CN");
     assert.equal(resolvePanelLang({ saved: null, hostLocale: "zh-Hans-CN", navLang: "en" }), "zh-CN");
@@ -820,15 +1001,18 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     );
 
     // Fan states: fanless, active dual RPM, Macs Fan Control yield, unavailable
-    const fanless = describeFanState({ status: "fanless", fans: [], ownershipMode: "observer", readOnly: true }, "en");
+    const fanless = describeFanState({ status: "fanless", fans: [], ownershipMode: "observer", readOnly: true }, "en", true);
     assert.equal(fanless.rpmText, "No fans (passive cooling)");
     assert.equal(fanless.showController, false);
+    assert.ok(fanless.caption.includes("guard paused"));
 
     const dual = describeFanState({
       status: "ok",
       fans: [{ id: 0, rpm: 2140, manual: false }, { id: 1, rpm: 2210, manual: false }],
+      smcMode: "auto",
       controller: "System (macOS)",
       externalManagers: [],
+      detectedMonitors: ["Fanny"],
       ownershipMode: "observer",
       readOnly: true,
     }, "en");
@@ -836,10 +1020,12 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     assert.equal(dual.badgeText, "Observer");
     assert.equal(dual.badgeKind, "in");
     assert.equal(dual.showController, true);
+    assert.ok(dual.caption.includes("Fanny"));
 
     const yieldMfc = describeFanState({
       status: "ok",
       fans: [{ id: 0, rpm: 4200, manual: true }, { id: 1, rpm: 4300, manual: true }],
+      smcMode: "manual",
       controller: "Macs Fan Control",
       externalManagers: ["Macs Fan Control"],
       ownershipMode: "yield",
@@ -854,14 +1040,17 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     const unavail = describeFanState({
       status: "unavailable",
       fans: [],
-      controller: "System (macOS)",
+      smcMode: "unknown",
+      controller: "Unknown",
       externalManagers: [],
       ownershipMode: "observer",
       readOnly: true,
-    }, "en");
+    }, "en", true);
     assert.equal(unavail.rpmText, "Unavailable");
+    assert.equal(unavail.controller, "Unknown (SMC)");
     assert.equal(unavail.badgeKind, "in");
     assert.equal(unavail.showController, true);
+    assert.ok(unavail.caption.includes("guard paused"));
 
     const base = {
       lidState: "open",

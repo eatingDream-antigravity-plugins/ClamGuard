@@ -1,7 +1,7 @@
 use crate::guard::{read_display_info, set_brightness_synced, BrightnessAction, DisplayInfo};
 use crate::i18n::{detect_lang, parse_lang_tag, Lang};
-use crate::launchagent::plist_exists;
-use crate::platform::display_ffi::DisplayBackend;
+use crate::launchagent::is_launchagent_active;
+use crate::platform::display_ffi::{DisplayBackend, LockScreenOutcome};
 use crate::platform::fan::{FanSensorSource, FanTelemetry};
 use crate::platform::macos::{MemorySummary, ProbeBackend};
 use crate::policy::{
@@ -121,8 +121,10 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "fan": {
             "status": s.fan.status,
             "fans": s.fan.fans,
+            "smcMode": s.fan.smc_mode,
             "controller": s.fan.controller,
             "externalManagers": s.fan.external_managers,
+            "detectedMonitors": s.fan.detected_monitors,
             "ownershipMode": s.fan.ownership_mode,
             "readOnly": s.fan.read_only,
             "stale": s.fan.stale,
@@ -157,11 +159,36 @@ pub fn format_fan(fan: &FanTelemetry, lang: Lang) -> String {
             .collect::<Vec<_>>()
             .join(", "),
     };
+    let mode_desc = match (lang, fan.smc_mode.as_str()) {
+        (Lang::ZhCn, "manual") => "SMC 手动",
+        (Lang::ZhCn, "auto") => "SMC 自动",
+        (Lang::ZhCn, "none") => "被动散热",
+        (Lang::ZhCn, _) => "SMC 模式未知",
+        (Lang::En, "manual") => "SMC manual",
+        (Lang::En, "auto") => "SMC auto",
+        (Lang::En, "none") => "passive",
+        (Lang::En, _) => "SMC mode unknown",
+    };
+    let software = if !fan.external_managers.is_empty() {
+        let joined = fan.external_managers.join(", ");
+        match lang {
+            Lang::ZhCn => format!("，检测到控扇软件: {joined}"),
+            Lang::En => format!(", detected fan control: {joined}"),
+        }
+    } else if !fan.detected_monitors.is_empty() {
+        let joined = fan.detected_monitors.join(", ");
+        match lang {
+            Lang::ZhCn => format!("，检测到监测软件: {joined}"),
+            Lang::En => format!(", detected monitor: {joined}"),
+        }
+    } else {
+        String::new()
+    };
     match (lang, fan.ownership_mode.as_str()) {
-        (Lang::ZhCn, "yield") => format!("{readings}（只读，由 {} 控制）", fan.controller),
-        (Lang::ZhCn, _) => format!("{readings}（只读，macOS 自动控制）"),
-        (Lang::En, "yield") => format!("{readings} (read-only, yielding to {})", fan.controller),
-        (Lang::En, _) => format!("{readings} (read-only, macOS automatic control)"),
+        (Lang::ZhCn, "yield") => format!("{readings}（只读，{mode_desc}{software}）"),
+        (Lang::ZhCn, _) => format!("{readings}（只读，{mode_desc}{software}）"),
+        (Lang::En, "yield") => format!("{readings} (read-only, {mode_desc}{software})"),
+        (Lang::En, _) => format!("{readings} (read-only, {mode_desc}{software})"),
     }
 }
 
@@ -184,17 +211,24 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
     match lang {
         Lang::ZhCn => {
             let disp_desc = if s.display.available {
-                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                if s.display.lid_closed || s.display.mode == "saved_target" {
                     let ext = if s.display.external_count > 0 {
-                        format!("（外接 {} 台）", s.display.external_count)
+                        format!("，外接 {} 台", s.display.external_count)
                     } else {
                         String::new()
                     };
+                    let panel_state = if s.display.internal_offline {
+                        "内屏已离线"
+                    } else if s.display.confirmed_asleep {
+                        "已确认熄屏"
+                    } else {
+                        "内屏仍在线"
+                    };
                     format!(
-                        "已合盖，恢复目标 {}%{ext}",
+                        "已合盖（{panel_state}{ext}），恢复目标 {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
-                } else if s.display.asleep {
+                } else if s.display.confirmed_asleep {
                     format!(
                         "已熄屏，恢复目标 {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
@@ -235,17 +269,24 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
         }
         Lang::En => {
             let disp_desc = if s.display.available {
-                if s.lid_state == "closed" || s.display.mode == "saved_target" {
+                if s.display.lid_closed || s.display.mode == "saved_target" {
                     let ext = if s.display.external_count > 0 {
-                        format!(" ({} external)", s.display.external_count)
+                        format!(", {} external", s.display.external_count)
                     } else {
                         String::new()
                     };
+                    let panel_state = if s.display.internal_offline {
+                        "internal offline"
+                    } else if s.display.confirmed_asleep {
+                        "confirmed asleep"
+                    } else {
+                        "internal online"
+                    };
                     format!(
-                        "closed, saved target {}%{ext}",
+                        "closed ({panel_state}{ext}), saved target {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
-                } else if s.display.asleep {
+                } else if s.display.confirmed_asleep {
                     format!(
                         "asleep, saved target {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
@@ -456,12 +497,12 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         detect_lang(settings.lang.as_deref())
     }
 
-    pub fn lock_screen(&self) -> Result<(&'static str, u64, u64), String> {
+    pub fn lock_screen(&self) -> Result<(LockScreenOutcome, u64, u64), String> {
         let t0 = Instant::now();
-        let method = self.display.lock_screen_now()?;
+        let outcome = self.display.lock_screen_now()?;
         let locked_at_ms = now_epoch_ms() as u64;
         let server_ms = t0.elapsed().as_millis() as u64;
-        Ok((method, locked_at_ms, server_ms))
+        Ok((outcome, locked_at_ms, server_ms))
     }
 
     fn disk_fingerprints(&self) -> (FileFingerprint, FileFingerprint) {
@@ -667,7 +708,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         let display_guard = guard_opt.as_ref().map(DisplayGuardSummary::from);
 
         let runner_active = self.bg_guard_active.load(Ordering::SeqCst)
-            || plist_exists()
+            || is_launchagent_active()
             || DaemonLock::is_active(&self.data_dir);
         let effective_thermal_cap = guard_for_disp.machine.thermal_capped
             && !guard_for_disp.user_intent.user_override_thermal;
@@ -816,8 +857,11 @@ mod tests {
         fn sleep_display_now(&self) -> bool {
             true
         }
-        fn lock_screen_now(&self) -> Result<&'static str, String> {
-            Ok("mock")
+        fn lock_screen_now(&self) -> Result<LockScreenOutcome, String> {
+            Ok(LockScreenOutcome {
+                method: "mock",
+                verified: true,
+            })
         }
     }
 
