@@ -11,6 +11,19 @@
       "jsonpath": "$.version"
     },
     {
+      "type": "json",
+      "path": "panel/package.json",
+      "jsonpath": "$.version"
+    },
+    {
+      "type": "generic",
+      "path": "panel/template.html"
+    },
+    {
+      "type": "generic",
+      "path": "panel/dist/panel.html"
+    },
+    {
       "type": "generic",
       "path": "assets/release-badge.svg"
     }

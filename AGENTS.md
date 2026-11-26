@@ -16,14 +16,14 @@ Guidance for AI coding agents working in `mac-clamshell-mcp`. For runtime thrott
 ## Build, Test & Security Gates (run before every PR)
 
 ```sh
-node panel/pack.mjs && node --test panel/test/panel.test.mjs
-cargo test --locked
+(cd panel && npm ci --ignore-scripts) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
+cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked
 ./scripts/check_sanitized.sh
 ```
 
 Release build (macOS, remap local paths):
 ```sh
-RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build --release --locked
+RUSTFLAGS="--remap-path-prefix=$HOME=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/src" cargo build --release --locked
 ```
 
 ## Invariants

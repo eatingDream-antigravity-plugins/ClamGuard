@@ -3,7 +3,10 @@
   "displayName": "Mac Clamshell MCP",
   "version": "1.4.0",
   "description": "Native Rust macOS clamshell performance throttling, display thermal guard, built-in brightness control, one-click lock screen, and low-bandwidth MCP dashboard.",
-  "author": "eatingDream",
+  "author": {
+    "name": "eatingDream",
+    "url": "https://github.com/eatingDream"
+  },
   "homepage": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
   "repository": "https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp",
   "logo": "assets/logo.svg",

@@ -1,9 +1,9 @@
-import { App, applyHostContext } from "./bridge.js";
+import { App } from "./bridge.js";
 import { attachRevealRefresh, createAdaptivePoller } from "./polling.js";
 import { clampPercent, createBrightnessController } from "./brightness.js";
 import { computeOptimisticState, describeFanState, describeGuardStatus, resolvePanelLang } from "./model.js";
 
-const doc = document, docEl = doc.documentElement, $ = (id) => doc.getElementById(id), root = $("app");
+const doc = document, docEl = doc.documentElement, $ = (id) => doc.getElementById(id), root = $("app"), st = setTimeout, ct = clearTimeout, M = Math;
 const boot = typeof window < "u" ? window.__MAC_CLAMSHELL_BOOT__ || null : null;
 const PRESETS = [0, 20, 50, 80, 100], MODE_IDS = ["auto", "normal", "utility", "eco", "strict"];
 const MODES = Object.fromEntries("auto|Auto|自动;normal|Normal|正常;utility|Utility|控温;eco|Eco|节能;strict|Strict|强限".split(";").map((r) => { const [k, e, z] = r.split("|"); return [k, [e, z]]; }));
@@ -28,9 +28,9 @@ let syncing = false, bSync = false, locking = false, optB = null, fb = null, fbT
 let pend = null, inF = false, gen = 0, drag = false, defr = false, busyT = null, spin = false;
 let fails = 0, off = false, bnrX = false, bnrE = null, canTools = false, autoWant = true;
 
-const app = new App({ name: "Mac Clamshell", version: "1.0.0" }, {});
 const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d), qa = (s) => root?.querySelectorAll?.(s) || [], q1 = (s) => root?.querySelector?.(s);
 const ga = (e, k) => e?.getAttribute?.(k) ?? null, sa = (e, k, v) => { const s = String(v); if (e && e.getAttribute(k) !== s) e.setAttribute(k, s); };
+const app = new App({ name: "Mac Clamshell", version: ga(doc.querySelector?.('meta[name="app-version"]'), "content") || "1.4.0" }, {});
 const tx = (e, v) => { const el = typeof e === "string" ? $(e) : e, s = String(v ?? ""); if (el && el.textContent !== s) el.textContent = s; };
 const vis = (e, on) => { const el = typeof e === "string" ? $(e) : e; if (el && el.hidden !== !on) el.hidden = !on; };
 const dis = (id, v) => { const e = $(id); if (e) e.disabled = v; }, on = (t, ev, fn) => t?.addEventListener(ev, fn);
@@ -59,7 +59,7 @@ const GR = { paused: ["Paused", "已暂停", "wn", 1], protecting: ["Protecting"
 const grHero = (d) => { const r = GR[gOff(d) ? "paused" : d?.guardStatus || "idle"] || ["Idle", "待命", "t3"]; return [bi(r[0], r[1]), r[2], !!r[3]]; };
 const effB = (d) => optB !== null ? optB : !d?.display ? null : (d.lidState === "closed" || d.display.asleep ? d.display.savedPercent ?? d.display.percent ?? 20 : d.display.percent ?? d.display.savedPercent ?? null);
 
-function setFb(k, t, retry = null) { fb = { k, t, retry }; clearTimeout(fbT); if (k === "ok") fbT = setTimeout(() => { fb = null; patchFb(); }, 2400); patchFb(); }
+function setFb(k, t, retry = null) { fb = { k, t, retry }; ct(fbT); if (k === "ok") fbT = st(() => { fb = null; patchFb(); }, 2400); patchFb(); }
 const setOk = (e, z) => setFb("ok", `✓ ${bi(e, z)}`), fail = (e, z, r) => setFb("err", bi(`${e} failed`, `${z}失败`), r);
 function patchFb() {
   const p = $("fb-p"); if (!p) return;
@@ -74,7 +74,7 @@ function patchDot(d = cur) {
 function patchBnr() {
   const b = $("bnr"); if (!b) return;
   if ((bnrE || off) && !bnrX) {
-    const net = netM || poller.getMetrics(), s = Math.max(1, Math.round((net.currentIntervalMs || 5e3) / 1e3));
+    const net = netM || poller.getMetrics(), s = M.max(1, M.round((net.currentIntervalMs || 5e3) / 1e3));
     vis(b, 1); sa(b, DK, bnrE ? "er" : "wn");
     tx("bnr-t", bnrE || `${bi("Connection lost", "连接中断")} · ${canTools && net.enabled ? bi(`retrying in ${s}s`, `${s}s 后重试`) : bi("auto off", "自动轮询已关")}`);
     vis("bnr-act", 1); tx("bnr-act", rty());
@@ -109,7 +109,7 @@ function patchChrome() {
   if (ts) tx("ht", fmtT(ts));
   tx("ft", net.inBackground ? bi("Background", "后台") : "");
   if (ch) {
-    const s = Math.round((net.currentIntervalMs || 3e3) / 1e3);
+    const s = M.round((net.currentIntervalMs || 3e3) / 1e3);
     ch.disabled = !canTools; sa(ch, DON, en); sa(ch, DPS, paused); sa(ch, AP, en);
     ch.title = ts ? bi(`Sync ${fmtT(ts)}`, `同步 ${fmtT(ts)}`) : "";
     tx($("auto-lbl") || ch.lastElementChild, en ? bi(`Auto ${s}s`, `自动 ${s}s`) : bi("Auto off", "自动关"));
@@ -170,7 +170,7 @@ function patchAll(d) {
   if (gb) { gb.disabled = !canTools; sa(gb, DON, gOn); sa(gb, DPS, grP); sa(gb, AC, gOn); }
   const rail = $("mode-rail");
   if (rail) {
-    rail.style.setProperty("--idx", String(Math.max(0, MODE_IDS.indexOf(ov))));
+    rail.style.setProperty("--idx", String(M.max(0, MODE_IDS.indexOf(ov))));
     for (const b of qa(`[${DM}]`)) { const sel = ga(b, DM) === ov; b.disabled = !canTools; sa(b, AC, sel); b.tabIndex = canTools && sel ? 0 : -1; }
   }
   setBg("mb", p.modeSource === "manual" ? bi("Manual", "手动") : prof !== "normal" ? pL : "", p.modeSource === "manual" ? "ac" : prof === "strict" ? "er" : "wn");
@@ -205,7 +205,7 @@ async function rpc(name, args, track = true) {
   const t0 = performance.now(), res = await app.callServerTool({ name, arguments: args });
   if (res?.isError || !res?.structuredContent) throw new Error(res?.content?.[0]?.text || "err");
   const sc = res.structuredContent;
-  if (track) { poller.recordExternalRpc({ totalMs: Math.round(performance.now() - t0), serverMs: sc.serverMs ?? 0, markSuccess: true }); onOk(); }
+  if (track) { poller.recordExternalRpc({ totalMs: M.round(performance.now() - t0), serverMs: sc.serverMs ?? 0, markSuccess: true }); onOk(); }
   return sc;
 }
 
@@ -215,7 +215,7 @@ const poller = createAdaptivePoller({
   onMetrics: (m) => { netM = m; patchChrome(); },
   fetcher: async ({ force, reason }) => {
     if (!canTools) return null;
-    if (force) { loading = true; clearTimeout(busyT); busyT = setTimeout(() => loading && ((spin = true), patchChrome()), 150); }
+    if (force) { loading = true; ct(busyT); busyT = st(() => loading && ((spin = true), patchChrome()), 150); }
     try {
       const sc = await rpc("clamshell_refresh", { force: !!force, ...(force ? { fresh: true } : {}), ...(hash ? { ifHash: hash } : {}) }, false);
       onOk(); applyData(sc);
@@ -225,7 +225,7 @@ const poller = createAdaptivePoller({
       onFail(reason);
       if (reason === "manual") fail("Refresh", "刷新", () => refreshNow(true));
       throw err;
-    } finally { if (force) { clearTimeout(busyT); loading = spin = false; patchChrome(); } }
+    } finally { if (force) { ct(busyT); loading = spin = false; patchChrome(); } }
   },
 });
 
@@ -282,7 +282,6 @@ async function flushQ() {
 function queueCfg(p) { gen += 1; pend = { ...(pend || {}), ...p }; syncing = true; if (cur) { cur = computeOptimisticState(cur, p); patchAll(cur); } flushQ(); }
 
 function syncCtx(ctx) {
-  applyHostContext(ctx);
   if (ctx?.locale && ctx.locale !== hostLoc) {
     hostLoc = ctx.locale;
     if (!storeLang()) {
@@ -309,7 +308,7 @@ on(root, "click", (e) => {
   const bs = ga(b, DBS); if (bs !== null) return setB(clampPercent((effB(cur) ?? 20) + +bs));
   const br = ga(b, DBR); if (br !== null) return setB(+br);
   const m = ga(b, DM); if (m) return queueCfg({ modeOverride: m });
-  const js = ga(b, DJS); if (js !== null) { const t = num(cur?.cpuTopology?.total, 8); return queueCfg({ maxJobsOverride: Math.max(1, Math.min(t, num(cur?.policy?.maxJobs, t) + +js)) }); }
+  const js = ga(b, DJS); if (js !== null) { const t = num(cur?.cpuTopology?.total, 8); return queueCfg({ maxJobsOverride: M.max(1, M.min(t, num(cur?.policy?.maxJobs, t) + +js)) }); }
   const ac = ga(b, DAC); if (ac) queueCfg({ acClosedProfile: ac });
 });
 
@@ -349,7 +348,7 @@ app.ontoolresult = (r) => {
   if (had && (sc.unchanged || (sc.hash && sc.hash === prev))) patchChrome(); else patchAll(cur);
 };
 app.onhostcontextchanged = (ctx) => { syncCtx(ctx); if (canTools && (ctx?.containerDimensions || ctx?.displayMode) && !drag && !bSync) poller.forceNow("host-context").catch(NOOP); };
-app.onteardown = () => { clearTimeout(busyT); clearTimeout(fbT); detach(); poller.destroy(); bCtrl.destroy(); window.removeEventListener(PU, endDrag); window.removeEventListener(PC, cancelDrag); return {}; };
+app.onteardown = () => { ct(busyT); ct(fbT); detach(); poller.destroy(); bCtrl.destroy(); window.removeEventListener(PU, endDrag); window.removeEventListener(PC, cancelDrag); return {}; };
 
 async function connectHost(manual = false) {
   try {
@@ -362,7 +361,7 @@ async function connectHost(manual = false) {
     if (canTools) {
       if (manual) await refreshNow(true);
       else if (boot?.stale) poller.trigger({ force: false, reason: "swr" }).catch(NOOP);
-      else if (!cur) setTimeout(() => { if (!cur) refreshNow(true); }, 150);
+      else if (!cur) st(() => { if (!cur) refreshNow(true); }, 150);
     }
   } catch (e) {
     canTools = false; loading = first = false; poller.setEnabled(false);
