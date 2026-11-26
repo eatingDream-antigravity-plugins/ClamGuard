@@ -6,10 +6,10 @@
 
 **让合盖跑编译与 AI Agent 的 MacBook 保持凉快、安静且行为可预期。**
 
-[主页](https://clamguard.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[主页](https://clamguard.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -45,7 +45,7 @@
 支持 macOS（Apple Silicon 与 Intel）。一键下载并校验发行版二进制，同时安装 Antigravity 插件：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
 ```
 
 也可直接在终端使用：
@@ -61,7 +61,7 @@ mac-clamshell-mcp guard install --interval 10   # 可选：24/7 常驻 LaunchAge
 将通用 Skill 与 AI 指南接入 Claude Code、Codex、Cursor、OpenCode 或 Antigravity（完整的 CLI 参数、MCP 工具定义与限流档位均集中在此）：
 
 ```sh
-npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
+npx skills add eatingDream-antigravity-plugins/ClamGuard
 ```
 
 > 可直接对你的 Agent 说：*「请阅读 [`llms.txt`](llms.txt) 和 [`docs/ai-guide.md`](docs/ai-guide.md)，帮我配置 `mac-clamshell-mcp` stdio MCP，并在限流时自动包裹重型构建命令。」*
@@ -82,7 +82,7 @@ npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 
 ## Antigravity 插件套件
 
-隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp)（`context-radar-mcp`）· **ClamGuard**（`mac-clamshell-mcp`）· [RemoteCast](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp)（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit)（`agy-mcp-kit`）统一驱动。
+隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar)（`context-radar-mcp`）· **ClamGuard**（`mac-clamshell-mcp`）· [RemoteCast](https://github.com/eatingDream-antigravity-plugins/RemoteCast)（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit)（`agy-mcp-kit`）统一驱动。
 
 ## 许可证
 

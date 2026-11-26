@@ -67,8 +67,8 @@ Note on `--lid-state`: `--lid-state closed` forces a safe deferred write (`saved
 Requires macOS, Rust (`cargo`), and Node.js 20+:
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
-cd mac-clamshell-mcp
+git clone https://github.com/eatingDream-antigravity-plugins/ClamGuard.git
+cd ClamGuard
 (cd panel && npm ci --ignore-scripts) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
 cargo test --locked && ./scripts/install-plugin.sh
 ```

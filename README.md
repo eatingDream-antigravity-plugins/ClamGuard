@@ -6,10 +6,10 @@
 
 **Keep your closed MacBook cool, quiet, and predictable when running builds or AI agents.**
 
-[Homepage](https://clamguard.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[Homepage](https://clamguard.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -45,7 +45,7 @@ It is **not** a fan-curve writer, kernel extension, or global `pmset` modifier�
 Requires macOS (Apple Silicon or Intel). Downloads the verified release binary and installs the Antigravity plugin:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
 ```
 
 Or run directly from your terminal:
@@ -61,7 +61,7 @@ mac-clamshell-mcp guard install --interval 10   # Optional 24/7 LaunchAgent
 Point Claude Code, Codex, Cursor, OpenCode, or Antigravity to the portable skill and AI guide—all CLI flags, MCP schemas, and throttling profiles live there:
 
 ```sh
-npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
+npx skills add eatingDream-antigravity-plugins/ClamGuard
 ```
 
 > Tell your agent: *"Read [`llms.txt`](llms.txt) and [`docs/ai-guide.md`](docs/ai-guide.md) to configure `mac-clamshell-mcp` stdio MCP and wrap heavy builds automatically when throttled."*
@@ -82,7 +82,7 @@ npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 
 ## Antigravity Plugin Suite
 
-Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp) (`context-radar-mcp`) · **ClamGuard** (`mac-clamshell-mcp`) · [RemoteCast](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp) (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit) (`agy-mcp-kit`).
+Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar) (`context-radar-mcp`) · **ClamGuard** (`mac-clamshell-mcp`) · [RemoteCast](https://github.com/eatingDream-antigravity-plugins/RemoteCast) (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit) (`agy-mcp-kit`).
 
 ## License
 
