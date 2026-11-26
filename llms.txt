@@ -1,6 +1,6 @@
-# Mac Clamshell MCP
+# ClamGuard (mac-clamshell-mcp)
 
-> Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, read-only AppleSMC fan telemetry (separating fan-control apps from monitors and reporting explicit SMC mode), external-display-safe closed-lid guard, adaptive build throttling, safe brightness control, and session-checked screen locking without sleeping background jobs.
+> Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, read-only AppleSMC fan telemetry (separating fan-control apps from monitors and reporting explicit SMC mode), external-display-safe closed-lid guard, adaptive build throttling, safe brightness control, and session-checked screen locking without sleeping background jobs. Homepage: https://clamguard.eatingdream.dev
 
 ## For AI Agents
 

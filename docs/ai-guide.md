@@ -1,6 +1,6 @@
-# Mac Clamshell MCP — AI Agent Guide & Operational Reference
+# ClamGuard (mac-clamshell-mcp) — AI Agent Guide & Operational Reference
 
-Complete operational reference for AI coding agents and advanced users configuring `mac-clamshell-mcp`. Human overview: [README.md](../README.md) | [README.zh-CN.md](../README.zh-CN.md).
+Complete operational reference for AI coding agents and advanced users configuring **ClamGuard** (`mac-clamshell-mcp`). Homepage: <https://clamguard.eatingdream.dev> · Human overview: [README.md](../README.md) | [README.zh-CN.md](../README.zh-CN.md).
 
 ## Throttling Profile Matrix
 

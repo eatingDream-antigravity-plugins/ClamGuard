@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="Mac Clamshell MCP" width="80" height="80">
+<img src="assets/logo.svg" alt="ClamGuard" width="80" height="80">
 
-# Mac Clamshell MCP
+# ClamGuard (mac-clamshell-mcp)
 
 **让合盖跑编译与 AI Agent 的 MacBook 保持凉快、安静且行为可预期。**
 
-[English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[主页](https://clamguard.eatingdream.dev) · [English](README.md) | 简体中文 · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
@@ -14,7 +14,7 @@
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-<img src="docs/social-preview.png" alt="Mac Clamshell MCP 面板预览" width="860">
+<img src="docs/social-preview.png" alt="ClamGuard 面板预览" width="860">
 
 </div>
 
@@ -79,6 +79,10 @@ npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 - [通用 Agent Skill（`skills/mac-clamshell/SKILL.md`）](skills/mac-clamshell/SKILL.md)
 - [LLM 索引（`llms.txt`）](llms.txt) · [贡献与开发指南（`AGENTS.md`）](AGENTS.md)
 - [参与贡献](CONTRIBUTING.md) · [更新日志](CHANGELOG.md) · [安全说明](SECURITY.md)
+
+## Antigravity 插件套件
+
+隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[ContextRadar](https://github.com/eatingDream-antigravity-plugins/context-radar-mcp)（`context-radar-mcp`）· **ClamGuard**（`mac-clamshell-mcp`）· [RemoteCast](https://github.com/eatingDream-antigravity-plugins/chrome-stream-mcp)（`chrome-stream-mcp`）· [ColabDeck](https://github.com/eatingDream-antigravity-plugins/colab-mcp)（`colab-mcp`），由 [PanelKit](https://github.com/eatingDream-antigravity-plugins/agy-mcp-kit)（`agy-mcp-kit`）统一驱动。
 
 ## 许可证
 
