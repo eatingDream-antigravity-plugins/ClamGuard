@@ -25,7 +25,7 @@ Binary: `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp` (writ
   - `utility` (lid closed + AC): `taskpolicy -c utility`, `nice 10`, `max_jobs` = E-cores clamped `2..4`; at most 1 heavy build/test at a time.
   - `eco` (lid closed + Battery): `taskpolicy -c background`, `nice 15`, `max_jobs <= 2` (`1` at `<= 20%` battery); run sequentially, prefer incremental builds/tests, avoid parallel fan-outs.
   - `strict` (thermal warning/throttle): `taskpolicy -b`, `nice 19`, `max_jobs=1`; do not start new heavy compute without alerting the user and letting the Mac cool down.
-- **Tools & user overrides**: Use `clamshell_panel` for status/dashboard, `clamshell_set_brightness` (or `brightness set <0..100>`, safely updates wake-restore target while closed), and `clamshell_lock_screen` (or `lock`, **only when explicitly requested**) to lock without sleeping. If the user explicitly asks for full speed on a task, comply and briefly note that throttling was bypassed.
+- **Tools & user overrides**: Use `clamshell_panel` for status/dashboard (including read-only AppleSMC fan RPM, `smcMode` (`auto`/`manual`/`unknown`), detected fan-control apps vs read-only monitors — zero root, zero SMC writes), `clamshell_set_brightness` (or `brightness set <0..100>`, verifies real hardware lid open + awake before writing and safely updates wake-restore target while closed), and `clamshell_lock_screen` (or `lock`, **only when explicitly requested**) to lock without sleeping (reports `verified` vs `submitted` from macOS session lock state). If the user explicitly asks for full speed on a task, comply and briefly note that throttling was bypassed.
 
 ## Cross-Client Setup
 

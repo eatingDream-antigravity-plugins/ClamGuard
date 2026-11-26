@@ -78,7 +78,9 @@ pub fn daemon_lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join("display-guard-daemon.lock")
 }
 
-pub fn file_fingerprint(path: &Path) -> Option<(u128, u64)> {
+pub type FileFingerprint = Option<(u128, u64)>;
+
+pub fn file_fingerprint(path: &Path) -> FileFingerprint {
     let meta = fs::metadata(path).ok()?;
     let mtime_ns = meta
         .modified()
@@ -193,6 +195,7 @@ pub fn read_settings(data_dir: &Path) -> Settings {
 }
 
 pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Settings> {
+    let _lock = FileLock::acquire_path(&data_dir.join("settings.lock"), true)?;
     let mut next = read_settings(data_dir);
     if let Some(m) = patch.mode_override.as_deref() {
         if VALID_MODES.contains(&m) {
@@ -311,6 +314,49 @@ fn default_saved_brightness() -> f64 {
     0.20
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayGuardSummary {
+    pub last_lid: String,
+    pub saved_brightness: Option<f64>,
+    pub last_sleep_ts: f64,
+    pub needs_restore: bool,
+    pub user_target: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub user_override_thermal: bool,
+    pub thermal_capped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_thermal_brightness: Option<f64>,
+}
+
+impl From<&GuardState> for DisplayGuardSummary {
+    fn from(s: &GuardState) -> Self {
+        let effective_thermal_cap =
+            s.machine.thermal_capped && !s.user_intent.user_override_thermal;
+        Self {
+            last_lid: s.machine.last_lid.clone(),
+            saved_brightness: if s.user_intent.saved_brightness.is_finite() {
+                Some((s.user_intent.saved_brightness * 1000.0).round() / 1000.0)
+            } else {
+                None
+            },
+            last_sleep_ts: s.machine.last_sleep_ts,
+            needs_restore: s.machine.needs_restore,
+            user_target: s.user_intent.user_target,
+            user_override_thermal: s.user_intent.user_override_thermal,
+            thermal_capped: effective_thermal_cap,
+            pre_thermal_brightness: if effective_thermal_cap {
+                s.machine
+                    .pre_thermal_brightness
+                    .filter(|v| v.is_finite())
+                    .map(|v| (v * 1000.0).round() / 1000.0)
+            } else {
+                None
+            },
+        }
+    }
+}
+
 pub fn load_guard_state(data_dir: &Path) -> GuardState {
     let path = guard_state_path(data_dir);
     match fs::read_to_string(&path) {
@@ -336,10 +382,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         ensure_private_dir(parent)?;
     }
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let fname = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("state");
+    let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("state");
     let tmp = path.with_file_name(format!("{fname}.tmp.{}.{seq}", std::process::id()));
     let write_res = OpenOptions::new()
         .write(true)
@@ -360,28 +403,34 @@ pub struct FileLock {
 
 impl FileLock {
     pub fn acquire(data_dir: &Path, blocking: bool) -> io::Result<Option<Self>> {
-        ensure_private_dir(data_dir)?;
+        Self::acquire_path(&lock_path(data_dir), blocking)
+    }
+
+    fn acquire_path(path: &Path, blocking: bool) -> io::Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(lock_path(data_dir))?;
+            .open(path)?;
         let flags = if blocking {
             libc::LOCK_EX
         } else {
             libc::LOCK_EX | libc::LOCK_NB
         };
-        let rc = unsafe { libc::flock(file.as_raw_fd(), flags) };
-        if rc == 0 {
-            Ok(Some(Self { file }))
-        } else {
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), flags) } == 0 {
+                return Ok(Some(Self { file }));
+            }
             let err = io::Error::last_os_error();
-            if !blocking && err.kind() == io::ErrorKind::WouldBlock {
-                Ok(None)
-            } else {
-                Err(err)
+            match err.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock if !blocking => return Ok(None),
+                _ => return Err(err),
             }
         }
     }
@@ -398,30 +447,13 @@ impl Drop for FileLock {
 /// Exclusive non-blocking daemon ownership lock (`display-guard-daemon.lock`) so only one
 /// long-lived guard loop (standalone `watch --daemon` or fallback `serve` observer) runs at a time.
 pub struct DaemonLock {
-    file: File,
+    _lock: FileLock,
 }
 
 impl DaemonLock {
     pub fn try_acquire(data_dir: &Path) -> io::Result<Option<Self>> {
-        ensure_private_dir(data_dir)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(daemon_lock_path(data_dir))?;
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc == 0 {
-            Ok(Some(Self { file }))
-        } else {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                Ok(None)
-            } else {
-                Err(err)
-            }
-        }
+        Ok(FileLock::acquire_path(&daemon_lock_path(data_dir), false)?
+            .map(|lock| Self { _lock: lock }))
     }
 
     pub fn is_active(data_dir: &Path) -> bool {
@@ -430,14 +462,6 @@ impl DaemonLock {
             return false;
         }
         matches!(Self::try_acquire(data_dir), Ok(None))
-    }
-}
-
-impl Drop for DaemonLock {
-    fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
     }
 }
 
@@ -483,23 +507,25 @@ pub fn format_iso8601_utc(epoch_ms: u128) -> String {
 /// Pure FIPS 180-4 SHA-256 returning full 64 lowercase hex characters.
 pub fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut padded = Vec::with_capacity(((data.len() + 9 + 63) / 64) * 64);
+    let mut padded = Vec::with_capacity((data.len() + 9).div_ceil(64) * 64);
     padded.extend_from_slice(data);
     padded.push(0x80);
     while padded.len() % 64 != 56 {
@@ -508,7 +534,7 @@ pub fn sha256_hex(data: &[u8]) -> String {
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 64];
-    for chunk in padded.chunks_exact(64) {
+    for chunk in padded.as_chunks::<64>().0 {
         for i in 0..16 {
             w[i] = u32::from_be_bytes([
                 chunk[i * 4],
@@ -576,6 +602,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn concurrent_settings_patches_preserve_disjoint_fields() {
+        let dir = std::env::temp_dir().join(format!(
+            "clamshell-settings-concurrent-{}",
+            std::process::id()
+        ));
+        for round in 0..16 {
+            let dir = dir.join(round.to_string());
+            let patches = [
+                SettingsPatch {
+                    mode_override: Some("strict".into()),
+                    ..SettingsPatch::default()
+                },
+                SettingsPatch {
+                    guard_enabled: Some(false),
+                    ..SettingsPatch::default()
+                },
+                SettingsPatch {
+                    lang: Some("zh-CN".into()),
+                    ..SettingsPatch::default()
+                },
+            ];
+            let barrier = std::sync::Barrier::new(patches.len());
+            std::thread::scope(|scope| {
+                for patch in patches {
+                    let (dir, barrier) = (&dir, &barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        write_settings(dir, &patch).unwrap();
+                    });
+                }
+            });
+            let settings = read_settings(&dir);
+            assert_eq!(settings.mode_override, "strict");
+            assert!(!settings.guard_enabled);
+            assert_eq!(settings.lang.as_deref(), Some("zh-CN"));
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn sha256_and_iso8601_helpers() {
         assert_eq!(
             sha256_hex(b""),
@@ -622,7 +688,11 @@ mod tests {
         assert_eq!(s.thermal_bright_cap_pct, 45);
         assert_eq!(s.lang.as_deref(), Some("zh-CN"));
 
-        let mode = fs::metadata(settings_path(&dir)).unwrap().permissions().mode() & 0o777;
+        let mode = fs::metadata(settings_path(&dir))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
 
         // Invalid values are ignored safely

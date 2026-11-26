@@ -47,7 +47,7 @@ pub fn execute_run(data_dir: &Path, opts: RunOptions) -> Result<i32, String> {
         return Err("missing command to execute".to_string());
     }
 
-    let probe = MacOsProbeBackend;
+    let probe = MacOsProbeBackend::default();
     let host = probe.static_host();
     let hw = probe.probe_hardware();
     let settings = read_settings(data_dir);

@@ -1,916 +1,378 @@
 import { App, applyHostContext } from "./bridge.js";
 import { attachRevealRefresh, createAdaptivePoller } from "./polling.js";
 import { clampPercent, createBrightnessController } from "./brightness.js";
-import { computeOptimisticState, describeGuardStatus, resolvePanelLang } from "./model.js";
+import { computeOptimisticState, describeFanState, describeGuardStatus, resolvePanelLang } from "./model.js";
 
-const $ = (id) => document.getElementById(id);
-const root = $("app");
-const bootData =
-  typeof window !== "undefined" && window.__MAC_CLAMSHELL_BOOT__
-    ? window.__MAC_CLAMSHELL_BOOT__
-    : null;
+const doc = document, docEl = doc.documentElement, $ = (id) => doc.getElementById(id), root = $("app");
+const boot = typeof window < "u" ? window.__MAC_CLAMSHELL_BOOT__ || null : null;
+const PRESETS = [0, 20, 50, 80, 100], MODE_IDS = ["auto", "normal", "utility", "eco", "strict"];
+const MODES = Object.fromEntries("auto|Auto|自动;normal|Normal|正常;utility|Utility|控温;eco|Eco|节能;strict|Strict|强限".split(";").map((r) => { const [k, e, z] = r.split("|"); return [k, [e, z]]; }));
+const LKEY = "mac-clamshell-lang", D = "data-", DK = D + "k", DM = D + "m", DBR = D + "br", DAC = D + "ac", DON = D + "on", DPS = D + "ps", DA = D + "a", DLG = D + "lg", DBS = D + "bs", DJS = D + "js", DST = D + "st", DBU = D + "busy", DDR = D + "drag";
+const AC = "aria-checked", AD = "aria-disabled", AP = "aria-pressed", AR = "ArrowRight", AL = "ArrowLeft", PU = "pointerup", PC = "pointercancel";
 
-const PRESETS = [0, 20, 50, 80, 100];
-const MODE_IDS = ["auto", "normal", "utility", "eco", "strict"];
-const MODE_EN = { auto: "Auto", normal: "Normal", utility: "Utility", eco: "Eco", strict: "Strict" };
-const MODE_ZH = { auto: "自动", normal: "正常", utility: "控温", eco: "节能", strict: "强限" };
-const LANG_KEY = "mac-clamshell-lang";
+const TXT = "k0|Lid|盒盖;k1|Power|电源;k2|Thermal|温控;k3|Guard|守护;k4|Display|亮度;k5|Lid guard|合盖守护;k6|Lock|锁屏;k7|Mode|档位;k8|Jobs|并发;ar|Reset|自动;k9|Fans|风扇;ka|Controller|控制方;kb|Details|详情;kc|Cores & Mem|核心内存;kd|Load & Power|负载电源;ke|Closed on AC|合盖插电"
+  .split(";").map((r) => r.split("|"));
+const ARIA = "#auto-chip|Auto|自动轮询;#lang-grp|Lang|语言;#lock-btn|Lock|锁屏;#refresh-btn|Refresh|刷新;#bnr-x|Close|关闭;#jd|Fewer jobs|减少并发;#ji|More jobs|增加并发"
+  .split(";").map((r) => r.split("|"));
 
-const STATIC_TXT = [
-  ["t-lock", "Lock", "锁屏"],
-  ["t-disp", "Built-in Display", "内建屏幕亮度"],
-  ["t-guard", "Closed-lid screen guard", "合盖熄屏守护"],
-  ["t-perf", "Performance Mode", "性能档位"],
-  ["t-jobs", "Parallel Jobs", "并发上限"],
-  ["ar", "Reset", "恢复自动"],
-  ["t-tray", "System Details", "系统详情"],
-  ["ck-lid", "Lid & Guard", "盒盖与守护"],
-  ["ck-pwr", "Power & Battery", "电源与电池"],
-  ["ck-thm", "Thermal & Load", "温控与负载"],
-  ["ck-cpu", "Cores & Memory", "核心与内存"],
-  ["t-ac", "Closed on AC power", "合盖插电默认档位"],
-];
+const storeLang = (v) => { try { return typeof localStorage < "u" ? (v === undefined ? localStorage.getItem(LKEY) : localStorage.setItem(LKEY, v)) : null; } catch { return null; } };
+const navL = () => (typeof navigator < "u" ? navigator.language : null);
+let hostLoc = null, lang = resolvePanelLang({ saved: storeLang(), navLang: navL(), bootLocale: boot?.locale });
+docEl.lang = lang;
 
-const STATIC_ARIA = [
-  ["#auto-chip", "Auto-refresh", "自动轮询"],
-  ["#lock-btn", "Lock Screen", "锁屏"],
-  ["#refresh-btn", "Refresh", "刷新"],
-  ["#lang-btn", "Switch language", "切换语言"],
-  ["#jd", "1 fewer job", "减少 1 并发"],
-  ["#ji", "1 more job", "增加 1 并发"],
-  ['[data-bs="-5"]', "Decrease 5%", "降低 5%"],
-  ['[data-bs="5"]', "Increase 5%", "升高 5%"],
-];
+const zh = () => lang === "zh-CN", bi = (e, z) => (zh() ? z : e), rty = () => bi("Retry", "重试"), mName = (id) => (MODES[id] ? MODES[id][zh() ? 1 : 0] : id);
+const loadTxt = () => bi("Loading…", "读取中…"), unk = () => bi("Unknown", "未知"), asl = () => bi("Asleep", "已熄屏");
 
-const storeLang = (v) => {
-  try {
-    if (typeof localStorage !== "undefined") {
-      return v === undefined ? localStorage.getItem(LANG_KEY) : localStorage.setItem(LANG_KEY, v);
-    }
-  } catch {}
-  return null;
-};
-
-let hostLocale = null;
-let curLang = resolvePanelLang({
-  saved: storeLang(),
-  hostLocale: null,
-  navLang: typeof navigator !== "undefined" ? navigator.language : null,
-  bootLocale: bootData?.locale,
-});
-document.documentElement.lang = curLang;
-
-const isZh = () => curLang === "zh-CN";
-const bi = (en, zh) => (isZh() ? zh : en);
-const modeName = (id) => (isZh() ? MODE_ZH[id] : MODE_EN[id]) || id;
-
-let curData = bootData;
-let confirmedData = bootData;
-let curHash = bootData?.hash || "";
-let isLoading = !bootData;
-let isSyncing = false;
-let isBrightSyncing = false;
-let isLocking = false;
-let optimisticBright = null;
-let fbState = null;
-let fbTimer = null;
-let netMetrics = null;
-let mounted = false;
-
-let pendingPatch = null;
-let saveInFlight = false;
-let saveGen = 0;
-let isDraggingBright = false;
-let patchDeferred = false;
-let busyTimer = null;
-let showBusySpin = false;
+let cur = boot, conf = boot, hash = boot?.hash || "", loading = !boot, first = Boolean(!boot || boot?.stale);
+let syncing = false, bSync = false, locking = false, optB = null, fb = null, fbT = null, netM = null, envK = "";
+let pend = null, inF = false, gen = 0, drag = false, defr = false, busyT = null, spin = false;
+let fails = 0, off = false, bnrX = false, bnrE = null, canTools = false, autoWant = true;
 
 const app = new App({ name: "Mac Clamshell", version: "1.0.0" }, {});
+const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d), qa = (s) => root?.querySelectorAll?.(s) || [], q1 = (s) => root?.querySelector?.(s);
+const ga = (e, k) => e?.getAttribute?.(k) ?? null, sa = (e, k, v) => { const s = String(v); if (e && e.getAttribute(k) !== s) e.setAttribute(k, s); };
+const tx = (e, v) => { const el = typeof e === "string" ? $(e) : e, s = String(v ?? ""); if (el && el.textContent !== s) el.textContent = s; };
+const vis = (e, on) => { const el = typeof e === "string" ? $(e) : e; if (el && el.hidden !== !on) el.hidden = !on; };
+const dis = (id, v) => { const e = $(id); if (e) e.disabled = v; }, on = (t, ev, fn) => t?.addEventListener(ev, fn);
+const redraw = () => (cur ? patchAll(cur) : patchChrome()), btr = () => $("bright-track"), NOOP = () => {};
+const gOff = (d) => d?.settings?.guardEnabled === false, hasD = (d) => Boolean(d?.display?.available || d?.lidState === "closed"), cS = (e, s) => e.target?.closest?.(s);
 
-const esc = (s) =>
-  String(s ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function mountControls() {
+  if (!doc.createElement) return;
+  for (const [id, arr, attr, fn] of [["prs-grp", PRESETS, DBR, (n) => `${n}%`], ["mode-rail", MODE_IDS, DM], ["ac-grp", ["utility", "eco"], DAC]]) {
+    const h = $(id); if (!h?.appendChild) continue;
+    for (const v of arr) { const b = doc.createElement("button"); b.type = "button"; sa(b, "role", "radio"); sa(b, attr, v); if (fn) b.textContent = fn(v); h.appendChild(b); }
+  }
+}
 
-const num = (v, fb = 0) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fb;
-};
-
-const qa = (s) => root.querySelectorAll(s);
-const sa = (el, k, v) => el?.setAttribute(k, String(v));
-const ga = (el, k) => el?.getAttribute(k);
-const tx = (el, v) => {
-  const e = typeof el === "string" ? $(el) : el;
-  if (e && e.textContent !== v) e.textContent = v;
-};
-
-function fmtUp(sec) {
-  if (!Number.isFinite(sec) || sec <= 0) return "-";
-  const d = Math.floor(sec / 86400);
-  const h = Math.floor((sec % 86400) / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const [du, hu, mu] = isZh() ? ["天 ", "时 ", "分"] : ["d ", "h ", "m"];
+const fmtUp = (s) => {
+  if (!Number.isFinite(s) || s <= 0) return "-";
+  const d = (s / 86400) | 0, h = ((s % 86400) / 3600) | 0, m = ((s % 3600) / 60) | 0, [du, hu, mu] = zh() ? ["天 ", "时 ", "分"] : ["d ", "h ", "m"];
   return d > 0 ? `${d}${du}${h}${hu.trim()}` : h > 0 ? `${h}${hu}${m}${mu}` : `${m}${mu}`;
-}
-
-function fmtTime(iso) {
-  if (!iso) return "-";
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toTimeString().slice(0, 8);
-}
-
-const lidShort = (l) =>
-  ({ closed: bi("Closed", "已合盖"), open: bi("Open", "已开盖") }[l] || bi("Unknown", "未知"));
-
-const powerShort = (p, pct) => {
-  const s = pct != null ? ` ${pct}%` : "";
-  const lbl = { battery: bi("Battery", "电池"), ac: bi("AC Power", "外接电源") }[p];
-  return lbl ? lbl + s : bi("Unknown power", "未知电源");
 };
+const fmtT = (iso) => { if (!iso) return "-"; const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.toTimeString().slice(0, 8); };
+const lidS = (l) => ({ closed: bi("Closed", "已合盖"), open: bi("Open", "已开盖") }[l] || unk());
+const pwrS = (p, pct) => { const l = { battery: bi("Battery", "电池"), ac: bi("AC", "插电") }[p]; return l ? l + (pct != null ? ` ${pct}%` : "") : unk(); };
+const TH = { critical: ["Critical", "严重过热", "er"], serious: ["Serious", "偏高降频", "er"], fair: ["Fair", "轻度温升", "wn"], unknown: ["Unknown", "未知", "t3"] };
+const thInfo = (d) => { const r = TH[d?.thermalPressure] || (d?.thermalState === "warn" ? TH.serious : d?.thermalState === "unknown" ? TH.unknown : ["Nominal", "正常", "ok"]); return [bi(r[0], r[1]), r[2]]; };
+const GR = { paused: ["Paused", "已暂停", "wn", 1], protecting: ["Protecting", "保护中", "ok"], thermal_cap: ["Thermal cap", "温控限亮", "wn"], armed: ["Active", "运行中", "ok"] };
+const grHero = (d) => { const r = GR[gOff(d) ? "paused" : d?.guardStatus || "idle"] || ["Idle", "待命", "t3"]; return [bi(r[0], r[1]), r[2], !!r[3]]; };
+const effB = (d) => optB !== null ? optB : !d?.display ? null : (d.lidState === "closed" || d.display.asleep ? d.display.savedPercent ?? d.display.percent ?? 20 : d.display.percent ?? d.display.savedPercent ?? null);
 
-const thermLabel = (d) => {
-  const p = d?.thermalPressure;
-  if (p === "critical") return bi("Critical", "严重过热");
-  if (p === "serious" || d?.thermalState === "warn") return bi("Serious", "偏高降频");
-  if (p === "fair") return bi("Fair", "轻度温升");
-  return bi("Nominal", "温度正常");
-};
-
-function effBright(d) {
-  if (optimisticBright !== null) return optimisticBright;
-  const disp = d?.display;
-  if (!disp) return null;
-  return d.lidState === "closed" || disp.asleep
-    ? disp.savedPercent ?? disp.percent ?? 20
-    : disp.percent ?? disp.savedPercent ?? null;
+function setFb(k, t, retry = null) { fb = { k, t, retry }; clearTimeout(fbT); if (k === "ok") fbT = setTimeout(() => { fb = null; patchFb(); }, 2400); patchFb(); }
+const setOk = (e, z) => setFb("ok", `✓ ${bi(e, z)}`), fail = (e, z, r) => setFb("err", bi(`${e} failed`, `${z}失败`), r);
+function patchFb() {
+  const p = $("fb-p"); if (!p) return;
+  if (syncing || bSync) { vis(p, 1); sa(p, DK, "sync"); vis("fb-d", 1); tx("fb-t", bi("Saving…", "同步中…")); vis("fb-r", 0); }
+  else if (fb) { const r = fb.k === "err" && !!fb.retry; vis(p, 1); sa(p, DK, fb.k); vis("fb-d", 0); tx("fb-t", fb.t); vis("fb-r", r); if (r) tx("fb-r", rty()); }
+  else vis(p, 0);
 }
-
-function setFeedback(kind, text, retry = null) {
-  fbState = { kind, text, retry };
-  if (fbTimer) clearTimeout(fbTimer);
-  if (kind === "ok") {
-    fbTimer = setTimeout(() => {
-      fbState = null;
-      patchFeedback();
-    }, 2400);
-  }
-  patchFeedback();
+function patchDot(d = cur) {
+  const p = d?.policy?.profile || "normal", thK = d ? thInfo(d)[1] : "ok", grP = d ? grHero(d)[2] : false;
+  sa($("hd"), DST, off || bnrE || p === "strict" || thK === "er" || d?.degraded ? "err" : grP || p === "utility" || p === "eco" || thK === "wn" ? "wait" : "run");
 }
-
-function patchFeedback() {
-  const slot = $("fb");
-  if (!slot) return;
-  let html = "";
-  if (isSyncing || isBrightSyncing) {
-    html = `<span class="fb p9 b1 g2 m2" data-k="sync"><span class="fd p9"></span><span>${bi("Saving…", "同步中…")}</span></span>`;
-  } else if (fbState) {
-    const r =
-      fbState.kind === "err" && fbState.retry
-        ? `<button type="button" class="rb" data-a="retry">${bi("Retry", "重试")}</button>`
-        : "";
-    html = `<span class="fb p9 b1 g2 m2" data-k="${fbState.kind}"><span>${esc(fbState.text)}</span>${r}</span>`;
-  }
-  if (slot.innerHTML !== html) slot.innerHTML = html;
+function patchBnr() {
+  const b = $("bnr"); if (!b) return;
+  if ((bnrE || off) && !bnrX) {
+    const net = netM || poller.getMetrics(), s = Math.max(1, Math.round((net.currentIntervalMs || 5e3) / 1e3));
+    vis(b, 1); sa(b, DK, bnrE ? "er" : "wn");
+    tx("bnr-t", bnrE || `${bi("Connection lost", "连接中断")} · ${canTools && net.enabled ? bi(`retrying in ${s}s`, `${s}s 后重试`) : bi("auto off", "自动轮询已关")}`);
+    vis("bnr-act", 1); tx("bnr-act", rty());
+  } else vis(b, 0);
 }
+function onOk() { const w = off || !!bnrE; fails = 0; off = bnrX = first = false; bnrE = null; patchDot(); patchBnr(); if (w) setOk("Reconnected", "已重新连接"); }
+function onFail(r) { first = false; if (r === "poll" && ++fails >= 3) { off = true; bnrX = false; } patchDot(); patchBnr(); }
 
-function applyTelemetry(payload) {
-  if (!payload || typeof payload !== "object") return;
-  if (payload.unchanged) {
-    if (curData && payload.timestamp) {
-      curData = { ...curData, timestamp: payload.timestamp };
-      if (confirmedData) confirmedData = { ...confirmedData, timestamp: payload.timestamp };
-    }
-    if (payload.hash) curHash = payload.hash;
+function applyData(p) {
+  if (!p || typeof p !== "object") return;
+  if (p.hash) hash = p.hash;
+  if (p.unchanged) {
+    const t = p.timestamp;
+    if (cur && t) { cur = { ...cur, timestamp: t }; if (conf) conf = { ...conf, timestamp: t }; }
     return;
   }
-  confirmedData = payload;
-  if (payload.hash) curHash = payload.hash;
-  curData =
-    isSyncing && curData?.settings ? computeOptimisticState(payload, curData.settings) : payload;
+  conf = p; cur = syncing && cur?.settings ? computeOptimisticState(p, cur.settings) : p;
 }
 
-function patchStaticI18n() {
-  if (!mounted) return;
-  document.documentElement.lang = curLang;
-  for (const [id, en, zh] of STATIC_TXT) tx(id, bi(en, zh));
-  for (const [sel, en, zh] of STATIC_ARIA) sa(root.querySelector(sel), "aria-label", bi(en, zh));
-  qa("[data-m]").forEach((b) => tx(b, modeName(ga(b, "data-m"))));
-  qa("[data-ac]").forEach((b) => tx(b, modeName(ga(b, "data-ac"))));
-  qa("[data-lg]").forEach((el) => sa(el, "data-act", ga(el, "data-lg") === curLang));
+function patchI18n() {
+  docEl.lang = lang;
+  for (const [id, e, z] of TXT) tx(id, bi(e, z));
+  tx("emp-btn", rty()); tx("bnr-act", rty());
+  for (const [sel, e, z] of ARIA) sa(q1(sel), "aria-label", bi(e, z));
+  for (const b of qa(`[${DM}],[${DAC}]`)) tx(b, mName(ga(b, DM) || ga(b, DAC)));
+  for (const b of qa(`[${DLG}]`)) sa(b, AP, ga(b, DLG) === lang);
 }
+const showEmpty = (m, r = false) => { vis("shell", 0); vis("emp", 1); tx("emp-msg", m); vis("emp-btn", r); };
 
 function patchChrome() {
-  if (!mounted) return false;
-  if (curData?.timestamp) tx("ht", fmtTime(curData.timestamp));
-  const net = netMetrics || poller.getMetrics();
+  const net = netM || poller.getMetrics(), ts = cur?.timestamp, paused = Boolean(cur && (gOff(cur) || cur.guardStatus === "paused")), ch = $("auto-chip"), en = canTools && net.enabled;
+  if (ts) tx("ht", fmtT(ts));
   tx("ft", net.inBackground ? bi("Background", "后台") : "");
-
-  const chip = $("auto-chip");
-  if (chip) {
-    const sec = Math.round((net.currentIntervalMs || 3000) / 1000);
-    sa(chip, "data-on", net.enabled);
-    sa(chip, "data-ps", false);
-    sa(chip, "aria-pressed", net.enabled);
-    tx(chip.lastElementChild, bi(`Auto ${sec}s`, `自动 ${sec}s`));
+  if (ch) {
+    const s = Math.round((net.currentIntervalMs || 3e3) / 1e3);
+    ch.disabled = !canTools; sa(ch, DON, en); sa(ch, DPS, paused); sa(ch, AP, en);
+    ch.title = ts ? bi(`Sync ${fmtT(ts)}`, `同步 ${fmtT(ts)}`) : "";
+    tx($("auto-lbl") || ch.lastElementChild, en ? bi(`Auto ${s}s`, `自动 ${s}s`) : bi("Auto off", "自动关"));
   }
-
-  const lb = $("lock-btn");
-  if (lb) lb.disabled = isLocking;
-  sa($("refresh-btn"), "data-busy", showBusySpin);
-  patchFeedback();
-  return true;
+  dis("lock-btn", locking || !canTools);
+  dis("refresh-btn", app.isConnected() && !canTools); sa($("refresh-btn"), DBU, spin);
+  vis("swp", first && cur);
+  patchDot(); patchFb(); patchBnr();
 }
 
-function patchBright(pct, ok = true) {
-  const v = ok ? `${pct}%` : "-";
-  tx("bv", v);
-  tx("biv", v);
-  const tr = $("bright-track");
-  if (tr) {
-    tr.style.setProperty("--pct", `${pct}%`);
-    sa(tr, "aria-valuenow", pct);
-    sa(tr, "aria-disabled", !ok);
-    sa(tr, "data-z", pct <= 0);
-    tr.tabIndex = ok ? 0 : -1;
-  }
-  qa("[data-bs]").forEach((b) => {
-    b.disabled = !ok;
-  });
-  qa("[data-br]").forEach((b) => {
-    b.disabled = !ok;
-    sa(b, "aria-checked", ok && Number(ga(b, "data-br")) === pct);
-  });
+function patchBright(pct, ok = true, showVal = ok) {
+  tx("bv", showVal ? `${pct}%` : "-");
+  const tr = btr();
+  if (tr) { tr.style.setProperty("--pct", `${pct}%`); sa(tr, "aria-valuenow", pct); sa(tr, AD, !ok); tr.tabIndex = ok ? 0 : -1; }
+  for (const b of qa(`[${DBS}],[${DBR}]`)) { b.disabled = !ok; const v = ga(b, DBR); if (v !== null) sa(b, AC, showVal && +v === pct); }
 }
+
+function patchEnv(d, prof, het, nice) {
+  const el = $("de"); if (!el) return;
+  const es = Object.entries(d.envVars || {}), qos = (prof === "utility" ? "Utility" : het ? "E-Core" : "Background") + " QoS";
+  const k = `${lang}|${qos}|${nice}|${es.map((x) => x.join("=")).join(";")}`;
+  if (k === envK) return; envK = k;
+  const none = bi("No limits", "无限流");
+  if (!el.replaceChildren || !doc.createElement) return tx(el, none);
+  const ce = (t) => doc.createElement(t), mk = (pre, val) => { const s = ce("span"); s.className = "et"; if (pre) s.appendChild(doc.createTextNode(pre)); const b = ce("strong"); b.textContent = String(val); s.appendChild(b); return s; };
+  if (!es.length) { const s = ce("span"); s.className = "cs"; s.textContent = none; return el.replaceChildren(s); }
+  el.replaceChildren(mk("", qos), mk("nice ", nice), ...es.map(([x, v]) => mk(`${x}=`, v)));
+}
+
+const setBg = (id, t, k = "in", tip = "") => { const e = $(id); if (!e) return; vis(e, !!t); if (t) { sa(e, DK, k); tx(e, t); e.title = tip; } };
 
 function patchAll(d) {
-  if (!d) return;
-  if (isDraggingBright) {
-    patchDeferred = true;
-    return;
+  if (!d) return; if (drag) { defr = true; return; }
+  defr = false; vis("shell", 1); vis("emp", 0);
+
+  const { policy: p = {}, settings: s = {}, display: disp = {}, host: h = {}, cpuTopology: ct = {}, lidState: lid, powerSource: pwr, batteryPct: bp0 } = d;
+  const rm = h.memory || {}, ov = s.modeOverride || "auto", prof = p.profile || "normal", pL = mName(prof), closed = lid === "closed";
+  const dispOk = hasD(d), bV = effB(d) ?? 20, rest = disp.savedPercent ?? bV;
+  const [thL, thK] = thInfo(d), [grL, grK, grP] = grHero(d);
+
+  patchDot(d);
+  const bp = clampPercent(bp0), bk = pwr === "ac" ? "ok" : bp <= 20 ? "er" : bp <= 40 ? "wn" : "ok";
+  for (const [id, k, t] of [["h-lid", lid === "open" ? "ok" : closed ? "ac" : "t3", lidS(lid)], ["h-pwr", bk, pwrS(pwr, bp0)], ["h-thm", thK, thL], ["h-grd", grK, grL]]) {
+    sa($(id + "-d"), DK, k); tx(id, t);
   }
-  patchDeferred = false;
-  if (!mounted) mountShell();
+  vis("hbb", bp0 != null);
+  const hbf = $("hbf"); if (hbf) { sa(hbf, DK, bk); hbf.style.width = `${bp}%`; }
 
-  const p = d.policy || {};
-  const s = d.settings || {};
-  const modeOv = s.modeOverride || "auto";
-  const profKey = p.profile || "normal";
-  const pLabel = modeName(profKey);
-  const disp = d.display || {};
-  const isClosed = d.lidState === "closed";
-  const bOk = Boolean(disp.available || isClosed);
-  const bVal = effBright(d) ?? 20;
-  const restorePct = disp.savedPercent ?? bVal;
+  const asleep = Boolean(disp.confirmedAsleep ?? disp.asleep), rst = bi(`restores ${rest}%`, `恢复 ${rest}%`);
+  setBg("bt", closed ? bi("Restore target", "恢复目标") : asleep ? asl() : "", closed ? "ac" : "in");
+  patchBright(bV, canTools && dispOk, dispOk);
+  const cap = !dispOk ? bi("No built-in display", "无内屏")
+    : closed ? `${bi("Closed", "已合盖")} · ${disp.internalOffline ? bi("offline", "内屏离线") : asleep ? asl() : bi("online", "内屏在线")} · ${rst}`
+    : asleep ? `${asl()} · ${rst}` : d.displayGuard?.thermalCapped ? bi("Thermal cap", "温控限亮中") : "";
+  vis("bc", !!cap);
 
-  sa($("hd"), "data-p", profKey);
-  tx("hs", `${lidShort(d.lidState)} · ${powerShort(d.powerSource, d.batteryPct)} · ${pLabel}`);
-
-  const setBadge = (id, txt, ac = false) => {
-    const el = $(id);
-    if (!el) return;
-    el.hidden = !txt;
-    if (txt) {
-      el.className = ac ? "bg p9 b1 g3 m2 ac" : "bg p9 b1 g3 m2";
-      tx(el, txt);
-    }
-  };
-  setBadge("bt", isClosed ? bi("Restore target", "恢复目标") : disp.asleep ? bi("Asleep", "已熄屏") : "", isClosed);
-  patchBright(bVal, bOk);
-
-  const bc = $("bc");
-  if (bc) {
-    const capText = !bOk
-      ? bi("No built-in display detected", "未检测到内建屏幕")
-      : isClosed
-      ? bi(`Closed · restores to ${restorePct}% on open`, `已合盖 · 开盖恢复 ${restorePct}%`)
-      : disp.asleep
-      ? bi(`Display asleep · restores to ${restorePct}% on wake`, `屏幕已熄屏 · 唤醒恢复 ${restorePct}%`)
-      : d.displayGuard?.thermalCapped
-      ? bi("Capped under thermal pressure", "温控护眼限亮中")
-      : "";
-    bc.hidden = !capText;
-    tx(bc, capText);
-  }
-
-  const guardOn = s.guardEnabled !== false;
-  const guardDesc = describeGuardStatus(d, restorePct, curLang);
-  tx("gs", guardDesc);
-  const gBtn = $("guard-btn");
-  if (gBtn) {
-    sa(gBtn, "data-on", guardOn);
-    sa(gBtn, "aria-checked", guardOn);
-    tx(gBtn.lastElementChild, guardOn ? bi("Active", "已开启") : bi("Paused", "已暂停"));
-  }
-
-  const idx = Math.max(0, MODE_IDS.indexOf(modeOv));
+  const gOn = !gOff(d), gb = $("guard-btn");
+  if (gb) { gb.disabled = !canTools; sa(gb, DON, gOn); sa(gb, DPS, grP); sa(gb, AC, gOn); }
   const rail = $("mode-rail");
   if (rail) {
-    rail.style.setProperty("--idx", String(idx));
-    qa("[data-m]").forEach((b) => {
-      const sel = ga(b, "data-m") === modeOv;
-      sa(b, "aria-checked", sel);
-      b.tabIndex = sel ? 0 : -1;
-    });
+    rail.style.setProperty("--idx", String(Math.max(0, MODE_IDS.indexOf(ov))));
+    for (const b of qa(`[${DM}]`)) { const sel = ga(b, DM) === ov; b.disabled = !canTools; sa(b, AC, sel); b.tabIndex = canTools && sel ? 0 : -1; }
   }
-
-  setBadge("mb", p.modeSource === "manual" ? bi("Manual", "手动") : profKey !== "normal" ? pLabel : "", p.modeSource === "manual");
-
-  const total = num(d.cpuTopology?.total, 8);
-  const curJobs = num(p.maxJobs, total);
-  tx(
-    "sv",
-    s.maxJobsOverride > 0
-      ? bi(`${curJobs} ${curJobs === 1 ? "job" : "jobs"}`, `${curJobs} 并发`)
-      : bi(`Auto · ${curJobs}`, `自动 · ${curJobs}`)
-  );
-  const rst = $("ar");
-  if (rst) rst.hidden = !(s.maxJobsOverride > 0);
-  const dec = $("jd");
-  const inc = $("ji");
-  if (dec) dec.disabled = curJobs <= 1;
-  if (inc) inc.disabled = curJobs >= total;
-
-  const pCores = num(d.cpuTopology?.performanceCores, 0);
-  const eCores = num(d.cpuTopology?.efficiencyCores, 0);
-  const hetero = pCores > 0;
-  const topo = hetero ? `${pCores}P+${eCores}E` : bi(`${total} cores`, `${total} 核`);
-
-  const h = d.host || {};
-  const rm = h.memory || {};
-  const memU = num(rm.usedGb, 0);
-  const memT = num(rm.totalGb, 0);
-  const memC = num(rm.compressedGb, 0);
-  const memP = Math.max(0, Math.min(100, Math.round(num(rm.usedPct, 0))));
-  const memLvl = memP >= 85 ? "danger" : memP >= 70 ? "warn" : "good";
-  const battPct = Math.max(0, Math.min(100, num(d.batteryPct, 0)));
-  const battLvl =
-    d.powerSource === "ac" ? "good" : battPct <= 20 ? "danger" : battPct <= 40 ? "warn" : "good";
-
-  const tText = thermLabel(d);
-  const upStr = bi(`Up ${fmtUp(h.uptimeSeconds)}`, `运行 ${fmtUp(h.uptimeSeconds)}`);
-  const spdStr =
-    d.cpuSpeedLimitPct != null
-      ? `${bi(`CPU limit ${num(d.cpuSpeedLimitPct, 100)}%`, `CPU 上限 ${num(d.cpuSpeedLimitPct, 100)}%`)} · ${upStr}`
-      : upStr;
-
-  for (const [id, val] of [
-    ["tp", `${topo} · ${bi(`Mem ${memP}%`, `内存 ${memP}%`)} · ${tText}`],
-    ["dl", lidShort(d.lidState)],
-    [
-      "ds",
-      d.clamshellCausesSleep === "no"
-        ? bi("Clamshell awake", "合盖不休眠")
-        : d.clamshellCausesSleep === "yes"
-        ? bi("Sleeps on close", "合盖休眠")
-        : "—",
-    ],
-    ["dg", guardDesc],
-    ["dp", powerShort(d.powerSource, d.batteryPct)],
-    [
-      "dlm",
-      bi("Low Power: ", "低电量模式：") +
-        (d.lowPowerMode === "1" ? bi("On", "已开") : d.lowPowerMode === "0" ? bi("Off", "未开") : "—"),
-    ],
-    ["dt", tText],
-    ["dsp", spdStr],
-    ["dld", bi(`Load ${(h.loadAvg || []).join(" · ")}`, `负载 ${(h.loadAvg || []).join(" · ")}`)],
-    ["dmu", String(memU)],
-    ["dmt", `/ ${memT} GB (${memP}%)`],
-    ["dc", `${topo} · ${bi(`${memC} GB compressed`, `压缩 ${memC} GB`)}`],
+  setBg("mb", p.modeSource === "manual" ? bi("Manual", "手动") : prof !== "normal" ? pL : "", p.modeSource === "manual" ? "ac" : prof === "strict" ? "er" : "wn");
+  const tot = num(ct.total, 8), jobs = num(p.maxJobs, tot), fi = describeFanState(d.fan, lang, grP);
+  vis("ar", s.maxJobsOverride > 0);
+  dis("ar", !canTools); dis("jd", !canTools || jobs <= 1); dis("ji", !canTools || jobs >= tot);
+  setBg("fth", thL, thK); vis("frow2", fi.showController);
+  if (fi.showController) { tx("fctrl", fi.controller); setBg("fown", fi.badgeText, fi.badgeKind, fi.tooltip); }
+  const pC = num(ct.performanceCores), eC = num(ct.efficiencyCores), het = pC > 0;
+  const topo = het ? `${pC}P+${eC}E` : bi(`${tot} cores`, `${tot} 核`), memP = clampPercent(rm.usedPct);
+  const up = bi(`Up ${fmtUp(h.uptimeSeconds)}`, `运行 ${fmtUp(h.uptimeSeconds)}`);
+  for (const [id, v] of [
+    ["hs", `${lidS(lid)} · ${pwrS(pwr, bp0)} · ${pL}`], ["bc", cap], ["gs", describeGuardStatus(d, rest, lang)],
+    ["sv", s.maxJobsOverride > 0 ? bi(`${jobs} ${jobs === 1 ? "job" : "jobs"}`, `${jobs} 并发`) : bi(`Auto · ${jobs}`, `自动 · ${jobs}`)],
+    ["frpm", fi.rpmText], ["fcap", fi.caption], ["tp", `${topo} · ${bi(`Mem ${memP}%`, `内存 ${memP}%`)} · ${thL}`],
+    ["dmu", num(rm.usedGb)], ["dmt", `/ ${num(rm.totalGb)} GB (${memP}%)`],
+    ["dc", `${topo} · ${bi(`${num(rm.compressedGb)} GB comp.`, `压缩 ${num(rm.compressedGb)} GB`)}`],
+    ["dld", `${bi("Load", "负载")} ${(h.loadAvg || []).join(" · ")}`],
+    ["dsp", d.cpuSpeedLimitPct != null ? `CPU ${num(d.cpuSpeedLimitPct, 100)}% · ${up}` : up],
+    ["ds", { no: bi("Awake on close", "合盖不休眠"), yes: bi("Sleeps on close", "合盖休眠") }[d.clamshellCausesSleep] || "—"],
+    ["dlm", `${bi("Low Power:", "低电量:")} ${{ 1: bi("On", "开"), 0: bi("Off", "关") }[d.lowPowerMode] || "—"}`],
     ["dhi", `${h.hostname || "Mac"} · ${h.chip || "Mac"} · macOS ${h.macosVersion || ""}`],
-  ]) tx(id, val);
-
-  const bBar = $("dbb");
-  if (bBar) bBar.hidden = d.batteryPct == null;
-  const setBar = (id, lvl, pct) => {
-    const f = $(id);
-    if (f) {
-      sa(f, "data-l", lvl);
-      f.style.width = `${pct}%`;
-    }
-  };
-  setBar("dbf", battLvl, battPct);
-  setBar("dmf", memLvl, memP);
-
-  qa("[data-ac]").forEach((b) => sa(b, "aria-checked", ga(b, "data-ac") === (s.acClosedProfile || "utility")));
-
-  const envEl = $("de");
-  if (envEl) {
-    const entries = Object.entries(d.envVars || {});
-    const tag = (k, v) => `<span class="et p9 b2 g3 m2">${k}<strong>${esc(v)}</strong></span>`;
-    const qosDesc =
-      profKey === "utility"
-        ? hetero
-          ? bi("Utility QoS", "Utility 控温调度")
-          : "Utility QoS + nice"
-        : hetero
-        ? bi("E-Core QoS + nice", "E-Core 节能调度")
-        : "Background QoS + nice";
-    const envHtml =
-      entries.length > 0
-        ? tag("", qosDesc) +
-          tag("nice ", p.niceLevel) +
-          entries.map(([k, v]) => tag(`${esc(k)}=`, v)).join("")
-        : `<span class="cs">${bi("No active process limits.", "当前未启用限流参数。")}</span>`;
-    if (envEl.innerHTML !== envHtml) envEl.innerHTML = envHtml;
-  }
-
-  const hostEl = $("dh");
-  if (hostEl) hostEl.title = d.paths?.settingsPath || "";
+  ]) tx(id, v);
+  const dmf = $("dmf"); if (dmf) { sa(dmf, DK, memP >= 85 ? "er" : memP >= 60 ? "wn" : "ok"); dmf.style.width = `${memP}%`; }
+  for (const b of qa(`[${DAC}]`)) { b.disabled = !canTools; sa(b, AC, ga(b, DAC) === (s.acClosedProfile || "utility")); }
+  patchEnv(d, prof, het, p.niceLevel ?? 0);
+  const dh = $("dh"); if (dh) dh.title = d.paths?.settingsPath || "";
   patchChrome();
-}
-
-function mountShell() {
-  if (mounted) return;
-  mounted = true;
-  const btn = (cls, attrs, body) => `<button type="button" class="${cls}" ${attrs}>${body}</button>`;
-  const cell = (kId, body) => `<div class="c cl g2"><div id="${kId}" class="ck"></div>${body}</div>`;
-
-  root.innerHTML = `<div id="shell" class="c shell">
-<header class="r hb">
-  <div class="f br">
-    <div class="fc emb b1 g2 sh" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 32 32" fill="none"><circle cx="16" cy="12" r="3.5" fill="#D97757" fill-opacity=".22"/><circle cx="16" cy="12" r="2.1" fill="#D97757"/><rect x="8" y="19.5" width="16" height="2" rx="1" fill="#D97757"/><rect x="6" y="22.5" width="20" height="2.2" rx="1.1" fill="currentColor" opacity=".88"/></svg></div>
-    <div>
-      <div class="ttl">Mac Clamshell</div>
-      <div class="f sub m2"><span id="hd" class="bd p9" data-p="normal"></span><span id="hs"></span></div>
-    </div>
-  </div>
-  <div class="f ha">
-    <span id="fb" class="fb-slot"></span>
-    ${btn("ch lg ns p9 b1 g2 sh m2", 'id="lang-btn" data-a="lang"', '<span data-lg="en">EN</span><span>/</span><span data-lg="zh-CN">中文</span>')}
-    ${btn("ch ns p9 b1 g2 sh m2", 'id="auto-chip" data-a="auto" aria-pressed="true"', `<span class="cd p9"></span><span>${bi("Auto 3s", "自动 3s")}</span>`)}
-    ${btn("ch lk ns p9 b1 g2 sh m2", 'id="lock-btn" data-a="lock"', '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id="t-lock"></span>')}
-    ${btn("ib p9 b1 g2 sh", 'id="refresh-btn" data-a="refresh"', '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>')}
-  </div>
-</header>
-<section class="c card warm b1 g2 sh">
-  <div class="r">
-    <div class="f lbl"><span id="t-disp"></span><span id="bt" class="bg p9 b1 g3 m2" hidden></span></div>
-    <span class="vb mn" id="bv">-</span>
-  </div>
-  <div class="f bs">
-    ${btn("fc mb ns p9 b1 g3", 'data-bs="-5"', "−")}
-    <div id="bright-track" class="pt ns p9 b1 g3" role="slider" aria-labelledby="t-disp" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="20" style="--pct:20%">
-      <div class="pf p9"></div>
-      <div class="r pi"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4"/></svg><span class="mn" id="biv">-</span></div>
-    </div>
-    ${btn("fc mb ns p9 b1 g3", 'data-bs="5"', "+")}
-  </div>
-  <div id="prs-grp" class="prs" role="radiogroup" aria-labelledby="t-disp">${PRESETS.map((n) => btn("pb p9 b2 g3 m2", `role="radio" data-br="${n}" aria-checked="false"`, `${n}%`)).join("")}</div>
-  <div id="bc" class="cap m2" hidden></div>
-  <div class="r gr">
-    <div class="f gk"><span id="t-guard"></span><span id="gs" class="gs m2"></span></div>
-    ${btn("ch ns p9 b1 g3 m2", 'id="guard-btn" role="switch" data-a="guard"', `<span class="cd p9"></span><span>${bi("Active", "已开启")}</span>`)}
-  </div>
-</section>
-<section class="c card b1 g2 sh">
-  <div class="r">
-    <div class="f lbl"><span id="t-perf"></span></div>
-    <span id="mb" class="bg p9 b1 g3 m2" hidden></span>
-  </div>
-  <div id="mode-rail" class="sr p9 b2 g3" role="radiogroup" aria-labelledby="t-perf" style="--idx:0">
-    <div class="th p9 g2" aria-hidden="true"></div>
-    ${MODE_IDS.map((id, idx) => btn("si p9 m2", `role="radio" data-m="${id}" aria-checked="${idx === 0}" tabindex="${idx === 0 ? 0 : -1}"`, "")).join("")}
-  </div>
-  <div class="r st-r">
-    <div class="f sk"><span id="t-jobs"></span>${btn("ar p9 b1 g3 m2", 'id="ar" data-a="jauto" hidden', "")}</div>
-    <div id="jobs-grp" class="f sc p9 b2 g3" role="group" aria-labelledby="t-jobs">
-      ${btn("fc sb p9 g2", 'id="jd" data-js="-1"', "−")}
-      <span id="sv" class="sv mn"></span>
-      ${btn("fc sb p9 g2", 'id="ji" data-js="1"', "+")}
-    </div>
-  </div>
-</section>
-<details id="diag-tray" class="tray b1 g2 sh">
-  <summary class="r ts ns">
-    <span class="f sl"><span id="t-tray" class="st-t"></span><span id="tp" class="spv el mn m2"></span></span>
-    <svg class="cv-i" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m9 18 6-6-6-6"/></svg>
-  </summary>
-  <div class="tb">
-    <div class="stp">
-      ${cell("ck-lid", '<div id="dl" class="cv"></div><div id="ds" class="cs"></div><div id="dg" class="cs"></div>')}
-      ${cell("ck-pwr", '<div id="dp" class="cv"></div><div id="dbb" class="bar p9 g3"><div id="dbf" class="bf p9"></div></div><div id="dlm" class="cs"></div>')}
-      ${cell("ck-thm", '<div id="dt" class="cv"></div><div id="dsp" class="cs mn"></div><div id="dld" class="cs mn"></div>')}
-      ${cell("ck-cpu", '<div class="cv"><span id="dmu"></span><span id="dmt" class="cu m2"></span></div><div class="bar p9 g3"><div id="dmf" class="bf p9"></div></div><div id="dc" class="cs"></div>')}
-    </div>
-    <div class="c tsec">
-      <div class="r acr">
-        <span id="t-ac"></span>
-        <div id="ac-grp" class="ss p9 b2 g3" role="radiogroup" aria-labelledby="t-ac">
-          ${btn("ssb p9 m2", 'role="radio" data-ac="utility" aria-checked="true"', "")}
-          ${btn("ssb p9 m2", 'role="radio" data-ac="eco" aria-checked="false"', "")}
-        </div>
-      </div>
-      <div id="de" class="envs"></div>
-    </div>
-    <footer class="r colo">
-      <span id="dh" class="mn el"><span id="dhi"></span> · <span id="ht"></span></span>
-      <span class="mn" id="ft"></span>
-    </footer>
-  </div>
-</details>
-</div>`;
-  patchStaticI18n();
 }
 
 async function rpc(name, args, track = true) {
-  const t0 = performance.now();
-  const res = await app.callServerTool({ name, arguments: args });
-  if (res?.isError || !res?.structuredContent) {
-    throw new Error(res?.content?.[0]?.text || "err");
-  }
+  const t0 = performance.now(), res = await app.callServerTool({ name, arguments: args });
+  if (res?.isError || !res?.structuredContent) throw new Error(res?.content?.[0]?.text || "err");
   const sc = res.structuredContent;
-  if (track) {
-    poller.recordExternalRpc({
-      totalMs: Math.round(performance.now() - t0),
-      serverMs: sc.serverMs ?? 0,
-      markSuccess: true,
-    });
-  }
+  if (track) { poller.recordExternalRpc({ totalMs: Math.round(performance.now() - t0), serverMs: sc.serverMs ?? 0, markSuccess: true }); onOk(); }
   return sc;
 }
 
-const showEmpty = (msg) => {
-  root.innerHTML = `<div class="shell"><div class="emp">${msg}</div></div>`;
-};
-
 const poller = createAdaptivePoller({
-  defaultEnabled: true,
-  shouldSkipBackgroundPoll: () =>
-    isSyncing || isBrightSyncing || isDraggingBright || saveInFlight,
-  onMetrics: (m) => {
-    netMetrics = m;
-    patchChrome();
-  },
+  defaultEnabled: false,
+  shouldSkipBackgroundPoll: () => !canTools || syncing || bSync || drag || inF,
+  onMetrics: (m) => { netM = m; patchChrome(); },
   fetcher: async ({ force, reason }) => {
-    if (force) {
-      isLoading = true;
-      clearTimeout(busyTimer);
-      busyTimer = setTimeout(() => {
-        if (isLoading) {
-          showBusySpin = true;
-          patchChrome();
-        }
-      }, 150);
-    }
+    if (!canTools) return null;
+    if (force) { loading = true; clearTimeout(busyT); busyT = setTimeout(() => loading && ((spin = true), patchChrome()), 150); }
     try {
-      const args = { force: Boolean(force) };
-      if (force) args.fresh = true;
-      if (curHash) args.ifHash = curHash;
-      const sc = await rpc("clamshell_refresh", args, false);
-      applyTelemetry(sc);
-      if (!sc.unchanged) patchAll(curData);
-      else patchChrome();
+      const sc = await rpc("clamshell_refresh", { force: !!force, ...(force ? { fresh: true } : {}), ...(hash ? { ifHash: hash } : {}) }, false);
+      onOk(); applyData(sc);
+      if (!sc.unchanged) patchAll(cur); else patchChrome();
       return sc;
     } catch (err) {
-      if (reason === "manual") setFeedback("err", bi("Refresh failed", "刷新失败"), () => refreshNow(true));
+      onFail(reason);
+      if (reason === "manual") fail("Refresh", "刷新", () => refreshNow(true));
       throw err;
-    } finally {
-      if (force) {
-        clearTimeout(busyTimer);
-        isLoading = false;
-        showBusySpin = false;
-        patchChrome();
-      }
-    }
+    } finally { if (force) { clearTimeout(busyT); loading = spin = false; patchChrome(); } }
   },
 });
 
-const brightnessCtrl = createBrightnessController({
+const bCtrl = createBrightnessController({
   setter: (percent) => rpc("clamshell_set_brightness", { percent }),
-  onOptimistic: (pct) => {
-    optimisticBright = pct;
-    patchBright(pct, true);
-  },
-  onSyncChange: (syncing) => {
-    isBrightSyncing = syncing;
-    patchFeedback();
-  },
+  onOptimistic: (p) => { optB = p; patchBright(p, canTools, true); },
+  onSyncChange: (s) => { bSync = s; patchFb(); },
   onCommit: (sc, target) => {
-    optimisticBright = null;
-    if (sc) applyTelemetry(sc);
-    const act = sc?.brightnessAction;
-    const isTarget = act?.mode === "saved_target";
-    const fin = isTarget ? act.savedPercent ?? target : act?.percent ?? target;
-    patchAll(curData);
-    setFeedback(
-      "ok",
-      isTarget ? bi(`✓ Restores to ${fin}%`, `✓ 开盖恢复 ${fin}%`) : bi(`✓ Brightness ${fin}%`, `✓ 亮度 ${fin}%`)
-    );
+    optB = null; if (sc) applyData(sc);
+    const a = sc?.brightnessAction, t = a?.mode === "saved_target", v = t ? a.savedPercent ?? target : a?.percent ?? target;
+    patchAll(cur);
+    t ? setOk(`Restores to ${v}%`, `开盖恢复 ${v}%`) : setOk(`Brightness ${v}%`, `亮度 ${v}%`);
   },
-  onRollback: (_err, target) => {
-    optimisticBright = null;
-    const bOk = Boolean(curData?.display?.available || curData?.lidState === "closed");
-    patchBright(effBright(curData) ?? 20, bOk);
-    setFeedback("err", bi("Brightness update failed", "亮度调节失败"), () =>
-      brightnessCtrl.schedule(target, { immediate: true })
-    );
+  onRollback: (_e, target) => {
+    optB = null; const dispOk = hasD(cur);
+    patchBright(effB(cur) ?? 20, canTools && dispOk, dispOk);
+    fail("Brightness", "亮度", () => setB(target));
   },
 });
+const setB = (v, imm = true) => bCtrl.schedule(v, { immediate: imm });
 
-const refreshNow = (force = true) =>
-  poller.trigger({ force, reason: force ? "manual" : "poll" }).catch(() => {});
+const refreshNow = (force = true) => (canTools ? poller.trigger({ force, reason: force ? "manual" : "poll" }).catch(NOOP) : Promise.resolve());
 
-async function lockScreenNow() {
-  if (isLocking) return;
-  isLocking = true;
-  patchChrome();
+async function lockNow() {
+  if (locking || !canTools) return;
+  locking = true; patchChrome();
   try {
-    await rpc("clamshell_lock_screen", {});
-    setFeedback("ok", bi("✓ Locked", "✓ 已锁屏"));
-  } catch (err) {
-    setFeedback("err", err?.message || bi("Lock failed", "锁屏失败"), () => lockScreenNow());
-  } finally {
-    isLocking = false;
-    patchChrome();
-  }
+    const r = await rpc("clamshell_lock_screen", {});
+    r?.verified === false ? setOk("Lock requested", "已提交锁屏") : setOk("Locked", "已锁屏");
+  } catch (e) { setFb("err", e?.message || bi("Lock failed", "锁屏失败"), lockNow); }
+  finally { locking = false; patchChrome(); }
 }
 
-async function flushQueue() {
-  if (saveInFlight || !pendingPatch) return;
-  saveInFlight = true;
-  isSyncing = true;
-  patchFeedback();
-
+async function flushQ() {
+  if (inF || !pend) return;
+  inF = syncing = true; patchFb();
   try {
-    while (pendingPatch) {
-      const patch = pendingPatch;
-      pendingPatch = null;
-      const myGen = saveGen;
-
+    while (pend) {
+      const patch = pend, g = gen; pend = null;
       try {
         const sc = await rpc("clamshell_configure", patch);
-        confirmedData = sc;
-        if (sc.hash) curHash = sc.hash;
-        const settled = myGen === saveGen && !pendingPatch;
-        curData = settled
-          ? sc
-          : curData?.settings
-          ? computeOptimisticState(sc, curData.settings)
-          : sc;
-        if (settled) {
-          patchAll(curData);
-          setFeedback("ok", bi("✓ Saved", "✓ 已保存"));
-        }
+        conf = sc; if (sc.hash) hash = sc.hash;
+        const ok = g === gen && !pend;
+        cur = ok ? sc : cur?.settings ? computeOptimisticState(sc, cur.settings) : sc;
+        if (ok) { patchAll(cur); setOk("Saved", "已保存"); }
       } catch {
-        if (pendingPatch) {
-          // Newer edit queued while RPC failed: preserve non-conflicting failed fields and keep flushing.
-          pendingPatch = { ...patch, ...pendingPatch };
-          continue;
-        }
-        curData = confirmedData;
-        patchAll(curData);
-        setFeedback("err", bi("Save failed", "保存失败"), () => queueSettings(patch));
-        break;
+        if (pend) { pend = { ...patch, ...pend }; continue; }
+        cur = conf; patchAll(cur); fail("Save", "保存", () => queueCfg(patch)); break;
       }
     }
-  } finally {
-    saveInFlight = false;
-    isSyncing = Boolean(pendingPatch);
-    patchFeedback();
-    if (pendingPatch) flushQueue();
-  }
+  } finally { inF = false; syncing = !!pend; patchFb(); if (pend) flushQ(); }
 }
 
-function queueSettings(patch) {
-  saveGen += 1;
-  pendingPatch = { ...(pendingPatch || {}), ...patch };
-  isSyncing = true;
-  if (curData) {
-    curData = computeOptimisticState(curData, patch);
-    patchAll(curData);
-  }
-  flushQueue();
-}
+function queueCfg(p) { gen += 1; pend = { ...(pend || {}), ...p }; syncing = true; if (cur) { cur = computeOptimisticState(cur, p); patchAll(cur); } flushQ(); }
 
-function toggleLang() {
-  curLang = isZh() ? "en" : "zh-CN";
-  storeLang(curLang);
-  patchStaticI18n();
-  if (curData) patchAll(curData);
-  queueSettings({ lang: curLang });
-}
-
-function syncHostContext(ctx) {
+function syncCtx(ctx) {
   applyHostContext(ctx);
-  if (ctx?.locale && ctx.locale !== hostLocale) {
-    hostLocale = ctx.locale;
+  if (ctx?.locale && ctx.locale !== hostLoc) {
+    hostLoc = ctx.locale;
     if (!storeLang()) {
-      const next = resolvePanelLang({
-        saved: null,
-        hostLocale,
-        navLang: typeof navigator !== "undefined" ? navigator.language : null,
-        bootLocale: curData?.locale,
-      });
-      if (next !== curLang) {
-        curLang = next;
-        patchStaticI18n();
-        if (curData) patchAll(curData);
-      }
+      const n = resolvePanelLang({ saved: null, hostLocale: hostLoc, navLang: navL(), bootLocale: cur?.locale });
+      if (n !== lang) { lang = n; patchI18n(); if (cur) patchAll(cur); }
     }
   }
 }
 
-function pctFromPtr(track, x) {
-  const r = track.getBoundingClientRect();
-  return r.width ? clampPercent(((x - r.left) / r.width) * 100) : effBright(curData) ?? 20;
-}
+const pctPtr = (tr, x) => { const r = tr.getBoundingClientRect(); return r.width ? clampPercent(((x - r.left) / r.width) * 100) : effB(cur) ?? 20; };
 
-root.addEventListener("click", (e) => {
-  const btn = e.target?.closest?.("button");
-  if (!btn || btn.disabled) return;
-  const a = ga(btn, "data-a");
-  if (a === "refresh") return refreshNow(true);
-  if (a === "lock") return lockScreenNow();
-  if (a === "auto") return poller.setEnabled(!poller.getMetrics().enabled);
-  if (a === "lang") return toggleLang();
-  if (a === "guard") return queueSettings({ guardEnabled: !(curData?.settings?.guardEnabled !== false) });
-  if (a === "retry") return fbState?.retry?.();
-  if (a === "jauto") return queueSettings({ maxJobsOverride: 0 });
-
-  const bs = ga(btn, "data-bs");
-  if (bs !== null) {
-    return brightnessCtrl.schedule(clampPercent((effBright(curData) ?? 20) + Number(bs)), {
-      immediate: true,
-    });
-  }
-  const br = ga(btn, "data-br");
-  if (br !== null) return brightnessCtrl.schedule(Number(br), { immediate: true });
-
-  const m = ga(btn, "data-m");
-  if (m) return queueSettings({ modeOverride: m });
-
-  const js = ga(btn, "data-js");
-  if (js !== null) {
-    const total = num(curData?.cpuTopology?.total, 8);
-    const next = Math.max(1, Math.min(total, num(curData?.policy?.maxJobs, total) + Number(js)));
-    return queueSettings({ maxJobsOverride: next });
-  }
-
-  const ac = ga(btn, "data-ac");
-  if (ac) queueSettings({ acClosedProfile: ac });
+on(root, "click", (e) => {
+  const b = cS(e, "button"); if (!b || b.disabled) return;
+  const a = ga(b, DA);
+  if (a === "refresh" || a === "bnr-retry") return app.isConnected() ? (canTools && refreshNow(true)) : connectHost(true);
+  if (a === "bnr-dismiss") { bnrX = true; patchBnr(); return; }
+  if (a === "retry") return fb?.retry?.();
+  const lg = ga(b, DLG); if (lg && lg !== lang) { lang = lg; storeLang(lg); patchI18n(); if (cur) patchAll(cur); if (canTools) queueCfg({ lang: lg }); return; }
+  if (!canTools) return;
+  if (a === "lock") return lockNow();
+  if (a === "auto") { autoWant = !poller.getMetrics().enabled; return poller.setEnabled(autoWant); }
+  if (a === "guard") return queueCfg({ guardEnabled: gOff(cur) });
+  if (a === "jauto") return queueCfg({ maxJobsOverride: 0 });
+  const bs = ga(b, DBS); if (bs !== null) return setB(clampPercent((effB(cur) ?? 20) + +bs));
+  const br = ga(b, DBR); if (br !== null) return setB(+br);
+  const m = ga(b, DM); if (m) return queueCfg({ modeOverride: m });
+  const js = ga(b, DJS); if (js !== null) { const t = num(cur?.cpuTopology?.total, 8); return queueCfg({ maxJobsOverride: Math.max(1, Math.min(t, num(cur?.policy?.maxJobs, t) + +js)) }); }
+  const ac = ga(b, DAC); if (ac) queueCfg({ acClosedProfile: ac });
 });
 
-root.addEventListener("pointerdown", (e) => {
-  const tr = e.target?.closest?.("#bright-track");
-  if (!tr || ga(tr, "aria-disabled") === "true") return;
-  isDraggingBright = true;
-  sa(tr, "data-drag", "true");
-  tr.setPointerCapture?.(e.pointerId);
-  brightnessCtrl.schedule(pctFromPtr(tr, e.clientX), { immediate: false });
+on(root, "pointerdown", (e) => {
+  const tr = cS(e, "#bright-track"); if (!tr || ga(tr, AD) === "true") return;
+  drag = true; sa(tr, DDR, "true"); tr.setPointerCapture?.(e.pointerId); setB(pctPtr(tr, e.clientX), false);
 });
-
-root.addEventListener("pointermove", (e) => {
-  if (!isDraggingBright) return;
-  const tr = $("bright-track");
-  if (tr) brightnessCtrl.schedule(pctFromPtr(tr, e.clientX), { immediate: false });
-});
-
+on(root, "pointermove", (e) => { const tr = drag && btr(); if (tr) setB(pctPtr(tr, e.clientX), false); });
 function endDrag(e) {
-  if (!isDraggingBright) return;
-  isDraggingBright = false;
-  const tr = $("bright-track");
-  tr?.removeAttribute("data-drag");
-  if (tr && e && typeof e.clientX === "number") {
-    brightnessCtrl.schedule(pctFromPtr(tr, e.clientX), { immediate: true });
-  } else {
-    brightnessCtrl.flush();
-  }
-  if (patchDeferred && curData) patchAll(curData);
+  if (!drag) return; drag = false; const tr = btr(); tr?.removeAttribute(DDR);
+  if (tr && e?.clientX != null) setB(pctPtr(tr, e.clientX)); else bCtrl.flush();
+  if (defr && cur) patchAll(cur);
 }
-
 const cancelDrag = () => endDrag();
+on(window, PU, endDrag); on(window, PC, cancelDrag);
 
-window.addEventListener("pointerup", endDrag);
-window.addEventListener("pointercancel", cancelDrag);
-
-root.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") {
-    const tray = $("diag-tray");
-    if (tray?.open) {
-      tray.open = false;
-      tray.querySelector("summary")?.focus();
-      e.preventDefault();
-    }
-    return;
-  }
-
+on(root, "keydown", (e) => {
+  if (e.key === "Escape") { const t = $("diag-tray"); if (t?.open) { t.open = false; t.querySelector("summary")?.focus(); e.preventDefault(); } return; }
   if (e.target?.id === "bright-track") {
-    if (ga(e.target, "aria-disabled") === "true") return;
-    const cur = effBright(curData) ?? 20;
-    const step = e.shiftKey ? 10 : 1;
-    const delta = {
-      ArrowRight: step,
-      ArrowUp: step,
-      ArrowLeft: -step,
-      ArrowDown: -step,
-      PageUp: 10,
-      PageDown: -10,
-      Home: -cur,
-      End: 100 - cur,
-    }[e.key];
-    if (delta !== undefined) {
-      e.preventDefault();
-      brightnessCtrl.schedule(clampPercent(cur + delta), { immediate: false });
-    }
+    if (ga(e.target, AD) === "true") return;
+    const c = effB(cur) ?? 20, s = e.shiftKey ? 10 : 1;
+    const d = { [AR]: s, ArrowUp: s, [AL]: -s, ArrowDown: -s, PageUp: 10, PageDown: -10, Home: -c, End: 100 - c }[e.key];
+    if (d !== undefined) { e.preventDefault(); setB(clampPercent(c + d), false); }
     return;
   }
-
-  const arrow = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
-  if (!arrow) return;
-  const mBtn = e.target?.closest?.("[data-m]");
-  if (mBtn) {
-    e.preventDefault();
-    const nextId = MODE_IDS[(MODE_IDS.indexOf(ga(mBtn, "data-m")) + arrow + MODE_IDS.length) % MODE_IDS.length];
-    queueSettings({ modeOverride: nextId });
-    root.querySelector(`[data-m="${nextId}"]`)?.focus();
-    return;
-  }
-  const pBtn = e.target?.closest?.("[data-br]");
-  if (pBtn) {
-    e.preventDefault();
-    const nextPct = PRESETS[(PRESETS.indexOf(Number(ga(pBtn, "data-br"))) + arrow + PRESETS.length) % PRESETS.length];
-    brightnessCtrl.schedule(nextPct, { immediate: true });
-    root.querySelector(`[data-br="${nextPct}"]`)?.focus();
-  }
+  const dir = e.key === AR ? 1 : e.key === AL ? -1 : 0; if (!dir || !canTools) return;
+  const mb = cS(e, `[${DM}]`), pb = cS(e, `[${DBR}]`);
+  if (mb) { e.preventDefault(); const n = MODE_IDS[(MODE_IDS.indexOf(ga(mb, DM)) + dir + 5) % 5]; queueCfg({ modeOverride: n }); q1(`[${DM}="${n}"]`)?.focus(); }
+  else if (pb) { e.preventDefault(); const n = PRESETS[(PRESETS.indexOf(+ga(pb, DBR)) + dir + 5) % 5]; setB(n); q1(`[${DBR}="${n}"]`)?.focus(); }
 });
 
-const detachReveal = attachRevealRefresh({
-  doc: document,
-  win: window,
-  target: document.documentElement,
-  poller,
-});
-
-app.ontoolinput = () => {
-  if (!curData && !mounted) {
-    isLoading = true;
-    showEmpty(bi("Reading Mac status…", "正在读取设备状态…"));
-  }
-};
-
+const detach = attachRevealRefresh({ doc, win: window, target: docEl, poller, onReveal: (r) => canTools && poller.forceNow(r).catch(NOOP) });
+app.ontoolinput = () => { if (!cur) { loading = true; showEmpty(loadTxt()); } };
 app.ontoolresult = (r) => {
-  const sc = r?.structuredContent;
-  if (!sc || typeof sc !== "object" || (!sc.unchanged && !sc.policy && !sc.host)) return;
-  const prevHash = curHash;
-  const hadData = Boolean(curData);
-  applyTelemetry(sc);
-  isLoading = false;
-  poller.markInitialBoot();
-  if (hadData && mounted && (sc.unchanged || (sc.hash && sc.hash === prevHash))) {
-    patchChrome();
-    return;
-  }
-  patchAll(curData);
+  const sc = r?.structuredContent; if (!sc || typeof sc !== "object" || (!sc.unchanged && !sc.policy && !sc.host)) return;
+  const prev = hash, had = !!cur; onOk(); applyData(sc); loading = false; if (canTools) poller.markInitialBoot();
+  if (had && (sc.unchanged || (sc.hash && sc.hash === prev))) patchChrome(); else patchAll(cur);
 };
+app.onhostcontextchanged = (ctx) => { syncCtx(ctx); if (canTools && (ctx?.containerDimensions || ctx?.displayMode) && !drag && !bSync) poller.forceNow("host-context").catch(NOOP); };
+app.onteardown = () => { clearTimeout(busyT); clearTimeout(fbT); detach(); poller.destroy(); bCtrl.destroy(); window.removeEventListener(PU, endDrag); window.removeEventListener(PC, cancelDrag); return {}; };
 
-app.onhostcontextchanged = (ctx) => {
-  syncHostContext(ctx);
-  if ((ctx?.containerDimensions || ctx?.displayMode) && !isDraggingBright && !isBrightSyncing) {
-    poller.forceNow("host-context").catch(() => {});
-  }
-};
-app.onteardown = () => {
-  clearTimeout(busyTimer);
-  clearTimeout(fbTimer);
-  detachReveal();
-  poller.destroy();
-  brightnessCtrl.destroy();
-  window.removeEventListener("pointerup", endDrag);
-  window.removeEventListener("pointercancel", cancelDrag);
-  return {};
-};
-
-async function init() {
-  if (bootData) {
-    poller.markInitialBoot();
-    patchAll(bootData);
-  } else {
-    showEmpty(bi("Reading Mac status…", "正在读取设备状态…"));
-  }
+async function connectHost(manual = false) {
   try {
     await app.connect();
-    syncHostContext(app.getHostContext());
-    patchChrome();
-    if (bootData?.stale) {
-      poller.trigger({ force: false, reason: "swr" }).catch(() => {});
-    } else if (!curData) {
-      setTimeout(() => {
-        if (!curData) refreshNow(true);
-      }, 150);
+    canTools = app.hasServerTools();
+    syncCtx(app.getHostContext());
+    onOk();
+    if (canTools) { if (autoWant) poller.setEnabled(true); if (cur) poller.markInitialBoot(); } else poller.setEnabled(false);
+    redraw();
+    if (canTools) {
+      if (manual) await refreshNow(true);
+      else if (boot?.stale) poller.trigger({ force: false, reason: "swr" }).catch(NOOP);
+      else if (!cur) setTimeout(() => { if (!cur) refreshNow(true); }, 150);
     }
-  } catch (err) {
-    isLoading = false;
-    if (!curData) {
-      showEmpty(`${bi("Initialization failed: ", "初始化失败：")}${esc(err?.message || err)}`);
-    } else {
-      setFeedback("err", bi("Host disconnected", "宿主连接异常"), () => refreshNow(true));
-    }
+  } catch (e) {
+    canTools = false; loading = first = false; poller.setEnabled(false);
+    if (!cur) showEmpty(`${bi("Init failed: ", "初始化失败：")}${e?.message || e}`, true);
+    else { bnrE = bi("Disconnected", "宿主断开"); bnrX = false; patchAll(cur); }
   }
 }
 
-init();
+(() => {
+  mountControls(); patchI18n();
+  if (boot) patchAll(boot); else showEmpty(loadTxt());
+  connectHost(false);
+})();
