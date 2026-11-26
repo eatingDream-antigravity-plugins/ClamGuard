@@ -1,12 +1,31 @@
-use crate::policy::CpuTopology;
+use super::ProbeCache;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::io::Read;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CMD_TIMEOUT_MS: u64 = 2500;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuTopology {
+    pub total: u32,
+    pub performance_cores: u32,
+    pub efficiency_cores: u32,
+}
+
+impl CpuTopology {
+    pub fn is_heterogeneous(&self) -> bool {
+        self.performance_cores > 0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,9 +65,13 @@ pub struct HardwareProbe {
 pub trait ProbeBackend: Send + Sync {
     fn static_host(&self) -> StaticHostInfo;
     fn probe_hardware(&self) -> HardwareProbe;
+    fn probe_hardware_fresh(&self) -> HardwareProbe {
+        self.probe_hardware()
+    }
+    /// Uncached lid probe for display write decisions.
     fn lid_closed_fast(&self) -> Option<bool>;
     fn thermal_pressure_fast(&self) -> String {
-        "nominal".to_string()
+        "unknown".to_string()
     }
 }
 
@@ -94,6 +117,11 @@ pub fn build_cpu_topology(total: u32, perflevel0: u32, perflevel1: u32) -> CpuTo
 }
 
 pub fn run_cmd_timeout(cmd: &str, args: &[&str], timeout_ms: u64) -> (bool, String) {
+    let (code, stdout) = run_cmd_exit_code(cmd, args, timeout_ms);
+    (code == Some(0), stdout)
+}
+
+pub fn run_cmd_exit_code(cmd: &str, args: &[&str], timeout_ms: u64) -> (Option<i32>, String) {
     let Ok(mut child) = Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
@@ -101,13 +129,13 @@ pub fn run_cmd_timeout(cmd: &str, args: &[&str], timeout_ms: u64) -> (bool, Stri
         .stderr(Stdio::null())
         .spawn()
     else {
-        return (false, String::new());
+        return (None, String::new());
     };
 
     let Some(mut stdout_pipe) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        return (false, String::new());
+        return (None, String::new());
     };
 
     // Drain stdout on a scoped reader thread so large output never deadlocks wait().
@@ -120,14 +148,14 @@ pub fn run_cmd_timeout(cmd: &str, args: &[&str], timeout_ms: u64) -> (bool, Stri
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut poll_ms = 1u64;
-    let ok = loop {
+    let code = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
+            Ok(Some(status)) => break status.code(),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break false;
+                    break None;
                 }
                 std::thread::sleep(Duration::from_millis(poll_ms));
                 poll_ms = (poll_ms * 2).min(8);
@@ -135,13 +163,13 @@ pub fn run_cmd_timeout(cmd: &str, args: &[&str], timeout_ms: u64) -> (bool, Stri
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                break false;
+                break None;
             }
         }
     };
 
     let stdout = reader.join().unwrap_or_default();
-    (ok, stdout)
+    (code, stdout)
 }
 
 pub fn parse_ioreg_clamshell(out: &str) -> (String, String) {
@@ -208,7 +236,7 @@ pub fn parse_pmset_batt(out: &str) -> (String, Option<u32>, String) {
 /// Parse `pmset -g therm`. Returns `(thermal_state, cpu_speed_limit_pct)` where `cpu_speed_limit_pct`
 /// is `Some(pct)` ONLY when Intel XCPM `CPU_Speed_Limit` was actually reported by macOS.
 pub fn parse_pmset_therm(out: &str) -> (String, Option<u32>) {
-    let mut thermal_state = "ok";
+    let mut thermal_state = "unknown";
     let mut speed_limit = None;
     let mut has_level = false;
     let mut no_warning = false;
@@ -230,6 +258,8 @@ pub fn parse_pmset_therm(out: &str) -> (String, Option<u32>) {
                     speed_limit = Some(v);
                     if v < 90 {
                         thermal_state = "warn";
+                    } else if thermal_state == "unknown" {
+                        thermal_state = "ok";
                     }
                 }
             }
@@ -240,6 +270,8 @@ pub fn parse_pmset_therm(out: &str) -> (String, Option<u32>) {
                 if let Ok(v) = digits.parse::<u32>() {
                     if v < 90 {
                         thermal_state = "warn";
+                    } else if thermal_state == "unknown" {
+                        thermal_state = "ok";
                     }
                 }
             }
@@ -248,6 +280,8 @@ pub fn parse_pmset_therm(out: &str) -> (String, Option<u32>) {
 
     if has_level && !no_warning {
         thermal_state = "warn";
+    } else if no_warning && thermal_state == "unknown" {
+        thermal_state = "ok";
     }
     (thermal_state.to_string(), speed_limit)
 }
@@ -269,16 +303,22 @@ pub fn resolve_thermal_status(
             "fair" | "moderate" | "1" => ("ok".to_string(), "fair".to_string(), None),
             "serious" | "heavy" | "warn" | "2" => ("warn".to_string(), "serious".to_string(), None),
             "critical" | "trapping" | "3" => ("warn".to_string(), "critical".to_string(), None),
-            other => ("ok".to_string(), other.to_string(), None),
+            _ => ("unknown".to_string(), "unknown".to_string(), None),
         };
     }
 
     let (pm_state, speed_limit) = parse_pmset_therm(pmset_out);
     let pressure = darwin_pressure
-        .unwrap_or(if pm_state == "warn" { "serious" } else { "nominal" })
+        .unwrap_or(match pm_state.as_str() {
+            "warn" => "serious",
+            "ok" => "nominal",
+            _ => "unknown",
+        })
         .to_string();
     let state = if pm_state == "warn" || matches!(pressure.as_str(), "serious" | "critical") {
         "warn"
+    } else if pressure == "unknown" {
+        "unknown"
     } else {
         "ok"
     }
@@ -300,10 +340,12 @@ pub fn parse_low_power_mode(out: &str) -> String {
     "unknown".to_string()
 }
 
+#[cfg(target_os = "macos")]
 fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
+#[cfg(target_os = "macos")]
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
@@ -551,7 +593,9 @@ mod native {
         let compressed = (vm.compressor_page_count as u64) * ps;
         let used = total_bytes.min(active.saturating_add(wired).saturating_add(compressed));
         let used_pct = if total_bytes > 0 {
-            ((used as f64 / total_bytes as f64) * 100.0).round().min(100.0) as u32
+            ((used as f64 / total_bytes as f64) * 100.0)
+                .round()
+                .min(100.0) as u32
         } else {
             0
         };
@@ -695,8 +739,7 @@ mod native {
             if service == 0 {
                 return None;
             }
-            let prop =
-                (api.create_cf_property)(service, api.clamshell_key, std::ptr::null(), 0);
+            let prop = (api.create_cf_property)(service, api.clamshell_key, std::ptr::null(), 0);
             let _ = (api.object_release)(service);
             if prop.is_null() {
                 return Some(None);
@@ -712,8 +755,136 @@ mod native {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct MacOsProbeBackend;
+type LidProbe = (String, String, bool);
+type PowerProbe = (String, Option<u32>, String);
+type ThermalProbe = (String, String, Option<u32>);
+
+struct ProbeSources {
+    lid: fn() -> Option<LidProbe>,
+    power: fn() -> Option<PowerProbe>,
+    thermal: fn() -> Option<ThermalProbe>,
+    low_power: fn() -> Option<String>,
+}
+
+const PROBE_SOURCES: ProbeSources = ProbeSources {
+    lid: probe_lid,
+    power: probe_power,
+    thermal: probe_thermal,
+    low_power: probe_low_power,
+};
+
+#[derive(Default)]
+pub struct MacOsProbeBackend {
+    lid: ProbeCache<Option<LidProbe>>,
+    power: ProbeCache<Option<PowerProbe>>,
+    thermal: ProbeCache<Option<ThermalProbe>>,
+    low_power: ProbeCache<Option<String>>,
+}
+
+fn mock_value(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|s| !s.trim().is_empty())
+}
+
+fn probe_lid_from_ioreg(ok: bool, out: &str) -> Option<LidProbe> {
+    if !ok {
+        return None;
+    }
+    let (lid, causes_sleep) = parse_ioreg_clamshell(out);
+    // Desktop Macs (Mac mini, Mac Studio, iMac, Mac Pro) return valid IOPMrootDomain output
+    // without an AppleClamshellState property; treat that as sensor-absent rather than degraded.
+    let valid_domain = out.contains("IOPMrootDomain");
+    let has_clamshell_key = out.contains("\"AppleClamshellState\"");
+    let sensor_absent = valid_domain && !has_clamshell_key && lid == "unknown";
+    Some((lid, causes_sleep, sensor_absent))
+}
+
+fn probe_lid() -> Option<LidProbe> {
+    if let Some(mock) = mock_value("MAC_CLAMSHELL_MOCK_LID") {
+        let trimmed = mock.trim();
+        let sensor_absent = trimmed.eq_ignore_ascii_case("desktop");
+        let lid = if sensor_absent {
+            "unknown".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        return Some((lid, "unknown".to_string(), sensor_absent));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let (ok, out) = run_cmd_timeout(
+            "/usr/sbin/ioreg",
+            &["-r", "-c", "IOPMrootDomain", "-d", "1", "-w", "0"],
+            CMD_TIMEOUT_MS,
+        );
+        probe_lid_from_ioreg(ok, &out)
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+fn probe_power() -> Option<PowerProbe> {
+    if let Some(mock) = mock_value("MAC_CLAMSHELL_MOCK_POWER") {
+        let pct = mock_value("MAC_CLAMSHELL_MOCK_BATT").and_then(|v| v.trim().parse().ok());
+        return Some((mock, pct, String::new()));
+    }
+    let (ok, out) = probe_pmset(&["-g", "batt"])?;
+    ok.then(|| parse_pmset_batt(&out))
+}
+
+fn mock_thermal() -> Option<ThermalProbe> {
+    let therm = mock_value("MAC_CLAMSHELL_MOCK_THERM");
+    let pressure = mock_value("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE");
+    (therm.is_some() || pressure.is_some())
+        .then(|| resolve_thermal_status(therm.as_deref(), pressure.as_deref(), None, ""))
+}
+
+fn sample_thermal_sources(
+    darwin_pressure: Option<&str>,
+    pmset_res: Option<(bool, String)>,
+) -> Option<ThermalProbe> {
+    let pmset_out = match pmset_res {
+        Some((true, ref out)) => out.as_str(),
+        _ => "",
+    };
+    if darwin_pressure.is_none() && pmset_out.is_empty() {
+        return None;
+    }
+    Some(resolve_thermal_status(
+        None,
+        None,
+        darwin_pressure,
+        pmset_out,
+    ))
+}
+
+fn probe_thermal() -> Option<ThermalProbe> {
+    if let Some(mock) = mock_thermal() {
+        return Some(mock);
+    }
+    // Sample Darwin thermal pressure and `pmset -g therm` independently so a pmset failure
+    // never drops an active serious/critical Darwin thermal signal.
+    let darwin = native_thermal_pressure();
+    let pmset = probe_pmset(&["-g", "therm"]);
+    sample_thermal_sources(darwin, pmset)
+}
+
+fn native_thermal_pressure() -> Option<&'static str> {
+    #[cfg(target_os = "macos")]
+    {
+        native::thermal_pressure_level()
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
+fn probe_low_power() -> Option<String> {
+    let (ok, out) = probe_pmset(&["-g"])?;
+    ok.then(|| parse_low_power_mode(&out))
+}
+
+fn probe_pmset(args: &[&str]) -> Option<(bool, String)> {
+    cfg!(target_os = "macos").then(|| run_cmd_timeout("/usr/bin/pmset", args, CMD_TIMEOUT_MS))
+}
 
 impl MacOsProbeBackend {
     fn compute_static_host() -> StaticHostInfo {
@@ -813,124 +984,49 @@ impl ProbeBackend for MacOsProbeBackend {
     }
 
     fn thermal_pressure_fast(&self) -> String {
-        let mock_pressure = std::env::var("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mock_therm = std::env::var("MAC_CLAMSHELL_MOCK_THERM")
-            .ok()
-            .filter(|s| !s.is_empty());
-        if mock_pressure.is_some() || mock_therm.is_some() {
-            let (_, pressure, _) =
-                resolve_thermal_status(mock_therm.as_deref(), mock_pressure.as_deref(), None, "");
-            return pressure;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            native::thermal_pressure_level()
-                .unwrap_or("nominal")
-                .to_string()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            "nominal".to_string()
-        }
+        mock_thermal()
+            .map(|(_, pressure, _)| pressure)
+            .unwrap_or_else(|| native_thermal_pressure().unwrap_or("unknown").to_string())
     }
 
     fn probe_hardware(&self) -> HardwareProbe {
-        let mock_lid = std::env::var("MAC_CLAMSHELL_MOCK_LID")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mock_power = std::env::var("MAC_CLAMSHELL_MOCK_POWER")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mock_batt = std::env::var("MAC_CLAMSHELL_MOCK_BATT")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mock_therm = std::env::var("MAC_CLAMSHELL_MOCK_THERM")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let mock_pressure = std::env::var("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE")
-            .ok()
-            .filter(|s| !s.is_empty());
+        self.collect_sources(false, &PROBE_SOURCES)
+    }
 
-        let (ioreg_res, batt_res, therm_res, pmset_res) = std::thread::scope(|s| {
-            let h_ioreg = s.spawn(|| {
-                if mock_lid.is_some() || !cfg!(target_os = "macos") {
-                    (true, String::new())
-                } else {
-                    run_cmd_timeout(
-                        "/usr/sbin/ioreg",
-                        &["-r", "-c", "IOPMrootDomain", "-d", "1", "-w", "0"],
-                        CMD_TIMEOUT_MS,
-                    )
-                }
-            });
-            let h_batt = s.spawn(|| {
-                if mock_power.is_some() || !cfg!(target_os = "macos") {
-                    (true, String::new())
-                } else {
-                    run_cmd_timeout("/usr/bin/pmset", &["-g", "batt"], CMD_TIMEOUT_MS)
-                }
-            });
-            let h_therm = s.spawn(|| {
-                if mock_therm.is_some() || mock_pressure.is_some() || !cfg!(target_os = "macos") {
-                    (true, String::new())
-                } else {
-                    run_cmd_timeout("/usr/bin/pmset", &["-g", "therm"], CMD_TIMEOUT_MS)
-                }
-            });
-            let h_pmset = s.spawn(|| {
-                if !cfg!(target_os = "macos") {
-                    (true, String::new())
-                } else {
-                    run_cmd_timeout("/usr/bin/pmset", &["-g"], CMD_TIMEOUT_MS)
-                }
-            });
-            (
-                h_ioreg.join().unwrap_or((false, String::new())),
-                h_batt.join().unwrap_or((false, String::new())),
-                h_therm.join().unwrap_or((false, String::new())),
-                h_pmset.join().unwrap_or((false, String::new())),
-            )
-        });
+    fn probe_hardware_fresh(&self) -> HardwareProbe {
+        self.collect_sources(true, &PROBE_SOURCES)
+    }
+}
 
-        let degraded = cfg!(target_os = "macos")
-            && (!ioreg_res.0 || !batt_res.0 || !therm_res.0 || !pmset_res.0);
+impl MacOsProbeBackend {
+    fn collect_sources(&self, fresh: bool, sources: &ProbeSources) -> HardwareProbe {
+        let lid = self
+            .lid
+            .sample(Duration::from_millis(1500), fresh, sources.lid);
+        let power = self
+            .power
+            .sample(Duration::from_secs(4), fresh, sources.power);
+        let thermal = self
+            .thermal
+            .sample(Duration::from_secs(4), fresh, sources.thermal);
+        let low_power = self
+            .low_power
+            .sample(Duration::from_secs(12), fresh, sources.low_power);
 
-        let (lid_state, clamshell_causes_sleep) = if let Some(m) = mock_lid {
-            (m, "unknown".to_string())
-        } else {
-            parse_ioreg_clamshell(&ioreg_res.1)
-        };
-
-        let (power_source, battery_pct, battery_detail) = if let Some(m) = mock_power {
-            let pct = mock_batt
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|s| s.parse::<u32>().ok());
-            (m, pct, String::new())
-        } else {
-            parse_pmset_batt(&batt_res.1)
-        };
-
-        #[cfg(target_os = "macos")]
-        let darwin_pressure = if mock_therm.is_none() && mock_pressure.is_none() {
-            native::thermal_pressure_level()
-        } else {
-            None
-        };
-        #[cfg(not(target_os = "macos"))]
-        let darwin_pressure: Option<&'static str> = None;
-
-        let (thermal_state, thermal_pressure, cpu_speed_limit_pct) = resolve_thermal_status(
-            mock_therm.as_deref(),
-            mock_pressure.as_deref(),
-            darwin_pressure,
-            &therm_res.1,
-        );
-
-        let low_power_mode = parse_low_power_mode(&pmset_res.1);
+        let unknown = || "unknown".to_string();
+        let (lid_state, clamshell_causes_sleep, lid_sensor_absent) =
+            lid.unwrap_or_else(|| (unknown(), unknown(), false));
+        let (power_source, battery_pct, battery_detail) =
+            power.unwrap_or_else(|| (unknown(), None, String::new()));
+        let (thermal_state, thermal_pressure, cpu_speed_limit_pct) =
+            thermal.unwrap_or_else(|| (unknown(), unknown(), None));
+        let low_power_mode = low_power.unwrap_or_else(unknown);
+        let lid_degraded = lid_state == "unknown" && !lid_sensor_absent;
+        let degraded = lid_degraded
+            || power_source == "unknown"
+            || thermal_state == "unknown"
+            || thermal_pressure == "unknown"
+            || low_power_mode == "unknown";
 
         #[cfg(target_os = "macos")]
         let (memory, load_avg, uptime_seconds) = (
@@ -973,6 +1069,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hardware_probe_sources_expire_independently_and_fresh_bypasses_each() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
+        let sources = ProbeSources {
+            lid: || {
+                CALLS[0].fetch_add(1, Ordering::Relaxed);
+                Some(("open".into(), "no".into(), false))
+            },
+            power: || {
+                CALLS[1].fetch_add(1, Ordering::Relaxed);
+                Some(("ac".into(), Some(82), String::new()))
+            },
+            thermal: || {
+                CALLS[2].fetch_add(1, Ordering::Relaxed);
+                Some(resolve_thermal_status(None, None, Some("nominal"), ""))
+            },
+            low_power: || {
+                CALLS[3].fetch_add(1, Ordering::Relaxed);
+                Some("0".into())
+            },
+        };
+        let counts = || std::array::from_fn(|i| CALLS[i].load(Ordering::Relaxed));
+        let backend = MacOsProbeBackend::default();
+        for _ in 0..5 {
+            let hardware = backend.collect_sources(false, &sources);
+            assert_eq!(hardware.lid_state, "open");
+            assert_eq!(hardware.power_source, "ac");
+            assert_eq!(hardware.thermal_pressure, "nominal");
+            assert_eq!(hardware.low_power_mode, "0");
+            assert!(!hardware.degraded);
+        }
+        assert_eq!(counts(), [1, 1, 1, 1]);
+
+        let age = |at: &mut Instant| *at -= Duration::from_secs(5);
+        age(&mut backend.lid.0.lock().unwrap().as_mut().unwrap().0);
+        age(&mut backend.power.0.lock().unwrap().as_mut().unwrap().0);
+        age(&mut backend.thermal.0.lock().unwrap().as_mut().unwrap().0);
+        age(&mut backend.low_power.0.lock().unwrap().as_mut().unwrap().0);
+        backend.collect_sources(false, &sources);
+        assert_eq!(counts(), [2, 2, 2, 1]);
+
+        backend.collect_sources(true, &sources);
+        assert_eq!(counts(), [3, 3, 3, 2]);
+    }
+
+    #[test]
+    fn thermal_failure_and_unknown_probes_degrade_while_preserving_independent_signals() {
+        // Independent thermal sampling: pmset failure must still preserve Darwin serious pressure
+        assert_eq!(
+            sample_thermal_sources(Some("serious"), Some((false, String::new()))),
+            Some(("warn".to_string(), "serious".to_string(), None))
+        );
+        assert_eq!(
+            sample_thermal_sources(None, Some((false, String::new()))),
+            None
+        );
+
+        let mut sources = ProbeSources {
+            lid: || Some(("open".into(), "yes".into(), false)),
+            power: || Some(("ac".into(), Some(75), String::new())),
+            thermal: || None,
+            low_power: || Some("0".into()),
+        };
+        let backend = MacOsProbeBackend::default();
+        let assert_unknown = |probe: HardwareProbe| {
+            assert_eq!(probe.thermal_state, "unknown");
+            assert_eq!(probe.thermal_pressure, "unknown");
+            assert_eq!(probe.cpu_speed_limit_pct, None);
+            assert!(probe.degraded);
+        };
+        assert_unknown(backend.collect_sources(false, &sources));
+        sources.thermal = || {
+            Some(resolve_thermal_status(
+                None,
+                None,
+                None,
+                "unexpected output",
+            ))
+        };
+        assert_unknown(backend.collect_sources(true, &sources));
+
+        // Parsed "unknown" strings for lid/power/low_power must mark degraded: true
+        sources.thermal = || Some(resolve_thermal_status(None, None, Some("nominal"), ""));
+        sources.lid = || Some(("unknown".into(), "unknown".into(), false));
+        assert!(backend.collect_sources(true, &sources).degraded);
+
+        // Desktop Mac with valid IOPMrootDomain output lacking AppleClamshellState is NOT degraded
+        sources.lid = || probe_lid_from_ioreg(true, "+-o IOPMrootDomain  <class IOPMrootDomain>");
+        let desktop = backend.collect_sources(true, &sources);
+        assert_eq!(desktop.lid_state, "unknown");
+        assert!(!desktop.degraded);
+
+        sources.power = || Some(("unknown".into(), None, String::new()));
+        assert!(backend.collect_sources(true, &sources).degraded);
+
+        sources.power = || Some(("ac".into(), None, String::new()));
+        sources.low_power = || Some("unknown".into());
+        assert!(backend.collect_sources(true, &sources).degraded);
+    }
+
+    #[test]
     fn parsers_thermal_ffi_and_topology_handle_apple_silicon_and_intel() {
         let ioreg = r#"
       "AppleClamshellCausesSleep" = No
@@ -995,7 +1193,10 @@ mod tests {
 
         // Intel XCPM pmset -g therm reports CPU_Speed_Limit
         let intel_therm = "CPU_Speed_Limit = 72\nCPU_Scheduler_Limit = 100\n";
-        assert_eq!(parse_pmset_therm(intel_therm), ("warn".to_string(), Some(72)));
+        assert_eq!(
+            parse_pmset_therm(intel_therm),
+            ("warn".to_string(), Some(72))
+        );
 
         // Darwin thermalpressurelevel mapping + combined resolution
         assert_eq!(map_darwin_thermal_level(0), "nominal");

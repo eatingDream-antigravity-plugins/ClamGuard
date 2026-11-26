@@ -1,5 +1,4 @@
 use crate::platform::macos::run_cmd_timeout;
-use crate::state::Settings;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,11 +19,7 @@ impl Lang {
 /// Parse a locale tag (`en`, `en_US.UTF-8`, `zh`, `zh-CN`, `zh-Hans-CN`, `C`, etc.).
 /// Returns `None` for empty strings or `"auto"`. Non-`zh` locales resolve to `Lang::En`.
 pub fn parse_lang_tag(raw: &str) -> Option<Lang> {
-    let cleaned = raw
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim();
+    let cleaned = raw.trim().trim_matches('"').trim_matches('\'').trim();
     if cleaned.is_empty() || cleaned.eq_ignore_ascii_case("auto") {
         return None;
     }
@@ -69,7 +64,8 @@ fn macos_apple_languages_fallback() -> Option<Lang> {
     *CACHED.get_or_init(|| {
         #[cfg(target_os = "macos")]
         {
-            let (ok, out) = run_cmd_timeout("/usr/bin/defaults", &["read", "-g", "AppleLanguages"], 400);
+            let (ok, out) =
+                run_cmd_timeout("/usr/bin/defaults", &["read", "-g", "AppleLanguages"], 400);
             if ok {
                 return parse_apple_languages_output(&out);
             }
@@ -103,9 +99,9 @@ where
     apple_fallback().unwrap_or(Lang::En)
 }
 
-pub fn detect_lang(settings: Option<&Settings>) -> Lang {
+pub fn detect_lang(settings_lang: Option<&str>) -> Lang {
     resolve_lang_with_env(
-        settings.and_then(|s| s.lang.as_deref()),
+        settings_lang,
         |k| std::env::var(k).ok(),
         macos_apple_languages_fallback,
     )

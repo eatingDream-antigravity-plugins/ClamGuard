@@ -4,110 +4,82 @@
 
 # Mac Clamshell MCP
 
-**Keep your MacBook cool, quiet, and its built-in screen truly off when running builds or AI agents with the lid closed.**
+**Keep your closed MacBook cool, quiet, and predictable when running builds or AI agents.**
+
+English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
-
-English | [简体中文](README.zh-CN.md)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <img src="docs/social-preview.png" alt="Mac Clamshell MCP panel preview" width="860">
 
 </div>
 
-## What it does
+## What It Is
 
-Closed MacBooks running docked or remote builds often overheat and leave the internal backlight lit. Mac Clamshell MCP watches lid, power, and thermal state to keep your Mac quiet and cool:
+A native Rust macOS MCP server, SEP-1865 live dashboard, and CLI wrapper that watches lid, power, and thermal pressure to throttle heavy commands and guard closed-lid display state.
 
-- **Turns off the closed built-in screen**: While Antigravity is open, the MCP server (`serve`) runs a lightweight display guard automatically—dropping backlight to 0% and sleeping the internal display on lid close, then restoring your previous brightness on wake.
-- **Throttles heavy builds automatically**: Adapts CPU priority and parallel job limits from lid state, AC vs. battery power, and macOS thermal pressure (Apple Silicon & Intel).
-- **Stays out of the way when open**: Silent in Antigravity while open and cool; only nudges the agent to wrap heavy commands and cap concurrency when throttled.
-- **Live bilingual panel, brightness & one-click lock**: Inspect status in Antigravity (`EN / 中文`), toggle the display guard or mode override, adjust brightness, or lock the screen without sleeping background jobs.
+It is **not** a fan-curve writer, kernel extension, or global `pmset` modifier—it never requires `sudo` and leaves other apps and fan managers untouched.
 
-| Mode | When it activates | What it does |
+## Features
+
+- **Closed-lid display guard (external-display safe)**: Without external monitors, puts the display to sleep (`pmset displaysleepnow`) on lid close and restores your saved brightness on open. When docked with external monitors, preserves external displays without triggering `displaysleepnow`, relies on macOS clamshell handling for the internal panel, and reports `lidClosed`, `internalOffline`, and `confirmedAsleep` separately while keeping wake-restore targets synced.
+- **Automatic build throttling**: Adapts CPU QoS (`taskpolicy`, `nice`) and parallel job caps (`normal`, `utility`, `eco`, `strict`) from live lid, battery/AC, and macOS thermal pressure (Apple Silicon & Intel).
+- **Silent when open and cool**: Emits zero hook noise while open under nominal thermals; only nudges the agent to wrap heavy builds when throttled.
+- **Read-only AppleSMC fan telemetry**: Reads live fan RPM and SMC control mode (`auto`, `manual`, or `unknown`) with zero SMC writes. Separately detects dedicated fan-control apps (`Macs Fan Control`, `TG Pro`, `smcFanControl`) and read-only monitors (`Fanny`, `Stats`, `iStat Menus`) without guessing a controller when SMC mode is unknown.
+- **Live bilingual panel & brightness control**: Inspect telemetry in Antigravity (`EN / 中文`), toggle guard or mode override, and adjust built-in brightness (or safely queue the wake-restore target while closed).
+- **Screen lock with session verification**: Locks without sleeping background tasks (`SACLockScreenImmediate`, with `CGSession` and `pmset` fallbacks), polls macOS `CGSSessionScreenIsLocked`, and explicitly reports `verified` vs `submitted` (`pmset` fails unless session lock is verified).
+
+| Profile | Trigger | Effect |
 | :--- | :--- | :--- |
-| **Normal** | Lid open and cool | Full speed, no throttling |
-| **Utility** | Lid closed on AC power | Utility CPU QoS (`nice 10`), limits jobs to E-cores (`2–4`, or half of cores on Intel) |
-| **Eco** | Lid closed on battery | Background QoS (`nice 15`), max 2 jobs (1 job at 20% battery or below) |
-| **Strict** | Serious or critical thermal pressure | Lowest priority (`taskpolicy -b`, `nice 19`), 1 job at a time |
+| **Normal** | Lid open & cool | Full speed, no throttling |
+| **Utility** | Lid closed on AC | Utility QoS (`nice 10`), E-core job cap (`2–4`) |
+| **Eco** | Lid closed on battery | Background QoS (`nice 15`), max `2` jobs (`1` at `<=20%`) |
+| **Strict** | Serious / critical thermal | Lowest priority (`taskpolicy -b`, `nice 19`), `1` job |
 
-## How Throttling Works & Privacy
+## Quick Start
 
-- **Process-scoped, zero root**: Needs no `sudo` and never touches NVRAM, SMC, kernel extensions, or global `pmset` settings. `mac-clamshell-mcp run` applies macOS `taskpolicy` QoS, POSIX `nice`, and standard build-concurrency variables only to the wrapped command tree, leaving other apps untouched with zero residue on exit.
-- **Reversible user-space display guard**: Uses standard macOS `DisplayServices` user-space APIs (the same layer as Control Center) so your prior brightness restores cleanly when the lid opens or thermal pressure clears.
-- **100% local & private**: Zero network requests and no telemetry; settings and guard state stay in your local user directory with owner-only permissions.
-
-## Install
-
-Requires macOS (Apple Silicon or Intel). Downloads the verified release binary and installs the plugin into `~/.gemini/config/plugins/mac-clamshell-mcp` (restart or reload Antigravity afterward):
+Requires macOS (Apple Silicon or Intel). Downloads the verified release binary and installs the Antigravity plugin:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh
-# Or pin a specific release:
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/main/scripts/install.sh | sh -s -- --version v1.2.0
 ```
 
-Antigravity already runs the display guard while open; to keep closed-lid protection running 24/7 even when Antigravity is closed, install the LaunchAgent via `mac-clamshell-mcp guard install` below.
-
-## How to use it
-
-### In Antigravity
-
-Open **Mac Clamshell** in the side pane, or ask your agent (e.g., *"Check my Mac's lid, battery, and thermal status"*, *"Dim the built-in display to 30%"*, or *"Run the test suite using clamshell throttling"*):
-
-| Tool | What it does |
-| :--- | :--- |
-| `clamshell_panel` | Opens the live dashboard and reports current lid, power, thermal, and mode status. |
-| `clamshell_set_brightness` | Sets built-in screen brightness (0–100%) immediately when open, or updates the wake-restore level while closed without lighting the screen. |
-| `clamshell_lock_screen` | Locks the macOS screen immediately (`SACLockScreenImmediate` with `CGSession`/`pmset` fallback) while keeping the Mac awake for background tasks. |
-
-### From the terminal
+Or run directly from your terminal:
 
 ```sh
-mac-clamshell-mcp status                                         # Lid, power, thermal, brightness & active mode
-mac-clamshell-mcp run -- cargo test                              # Run a command with automatic throttling
-mac-clamshell-mcp run --mode eco --jobs 2 --sh "npm run build && npm test"
-mac-clamshell-mcp brightness get                                 # Read or set built-in brightness (0-100%)
-mac-clamshell-mcp brightness set 60
-mac-clamshell-mcp lock                                           # Lock screen immediately without sleeping
-# Optional 24/7 LaunchAgent guard (or run ./scripts/install-launchagent.sh) / foreground daemon:
-mac-clamshell-mcp guard install --interval 10
-mac-clamshell-mcp guard status
-mac-clamshell-mcp guard uninstall
-mac-clamshell-mcp watch --daemon --interval 10
+mac-clamshell-mcp status
+mac-clamshell-mcp run -- cargo test
+mac-clamshell-mcp guard install --interval 10   # Optional 24/7 LaunchAgent
 ```
 
-## AI Agent Integration
+## For AI Agents
 
-- **Antigravity**: One-line installer above installs the MCP server, hooks, live panel, and `skills/mac-clamshell/SKILL.md` automatically.
-- **Claude Code / Codex / Cursor / OpenCode (any MCP client or shell agent)**: Add the portable skill [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp`) and configure stdio MCP (or invoke `mac-clamshell-mcp status` / `run` directly):
-
-```json
-{
-  "mcpServers": {
-    "mac-clamshell-mcp": {
-      "command": "/path/to/mac-clamshell-mcp",
-      "args": ["serve", "--data-dir", "/path/to/mac-clamshell-data", "--panel-html", "/path/to/panel.html"]
-    }
-  }
-}
-```
-
-- **LLM index & coding-agent guide**: [`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
-
-## Build from source
-
-Requires macOS, Rust (`cargo`), and Node.js 20+:
+Point Claude Code, Codex, Cursor, OpenCode, or Antigravity to the portable skill and AI guide—all CLI flags, MCP schemas, and throttling profiles live there:
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
-cd mac-clamshell-mcp
-(cd panel && npm install) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
-cargo test --locked && cargo build --release --locked && ./scripts/install-plugin.sh
+npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp
 ```
 
-## Contributing & License
+> Tell your agent: *"Read [`llms.txt`](llms.txt) and [`docs/ai-guide.md`](docs/ai-guide.md) to configure `mac-clamshell-mcp` stdio MCP and wrap heavy builds automatically when throttled."*
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), [CHANGELOG.md](CHANGELOG.md), and [SECURITY.md](SECURITY.md). Licensed under the [MIT License](LICENSE).
+## Safety & Privacy
+
+- **Zero outbound network traffic**: The binary makes no network calls and collects no analytics.
+- **Local stdio telemetry scope**: Over local MCP stdio, tool responses share host status with your connected MCP client—including hostname, chip/macOS version, CPU/memory/fan/display telemetry, and abbreviated local paths (`~/...`) for settings and binary location.
+- **Zero root & zero SMC writes**: Never needs `sudo`, never writes SMC/NVRAM/kexts, and stores local state under owner-only (`0700`/`0600`) permissions.
+- **Reversible user-space brightness**: Uses macOS `DisplayServices` user-space APIs and refuses to write brightness unless hardware confirms the lid is open and the internal panel is awake.
+
+## Documentation
+
+- [AI Agent Guide & Reference (`docs/ai-guide.md`)](docs/ai-guide.md) — MCP tools, CLI flags, throttle tiers, and LaunchAgent workflows
+- [Portable Agent Skill (`skills/mac-clamshell/SKILL.md`)](skills/mac-clamshell/SKILL.md)
+- [LLM Index (`llms.txt`)](llms.txt) · [Contributor Guide (`AGENTS.md`)](AGENTS.md)
+- [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+
+## License
+
+[MIT](LICENSE)

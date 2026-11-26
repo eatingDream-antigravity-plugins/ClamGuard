@@ -1,94 +1,33 @@
 // Debounced, single-flight, last-write-wins brightness controller for high-RTT links.
-
 export const BRIGHTNESS_DEBOUNCE_MS = 250;
-
-export function clampPercent(val) {
-  const n = Number(val);
-  if (!Number.isFinite(n)) return 0;
-  return Math.max(0, Math.min(100, Math.round(n)));
-}
+export const clampPercent = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Math.round(Number(v)))) : 0);
 
 export function createBrightnessController({
-  setter,
-  debounceMs = BRIGHTNESS_DEBOUNCE_MS,
-  setTimer = (fn, ms) => setTimeout(fn, ms),
-  clearTimer = (id) => clearTimeout(id),
-  onOptimistic = () => {},
-  onCommit = () => {},
-  onRollback = () => {},
-  onSyncChange = () => {},
+  setter, debounceMs = BRIGHTNESS_DEBOUNCE_MS, setTimer = (f, m) => setTimeout(f, m), clearTimer = (i) => clearTimeout(i),
+  onOptimistic = () => {}, onCommit = () => {}, onRollback = () => {}, onSyncChange = () => {},
 } = {}) {
-  let destroyed = false;
-  let inFlight = false;
-  let seq = 0;
-  let pendingPercent = null;
-  let debounceTimer = null;
-
-  function clearDebounce() {
-    if (debounceTimer !== null) {
-      clearTimer(debounceTimer);
-      debounceTimer = null;
-    }
-  }
-
+  let dead = false, busy = false, seq = 0, pend = null, tid = null;
+  const clr = () => { if (tid !== null) { clearTimer(tid); tid = null; } };
   async function flush() {
-    clearDebounce();
-    if (destroyed || inFlight || pendingPercent === null) return;
-    inFlight = true;
-    onSyncChange(true);
-
+    clr(); if (dead || busy || pend === null) return;
+    busy = true; onSyncChange(true);
     try {
-      while (!destroyed && pendingPercent !== null) {
-        const target = pendingPercent;
-        const mySeq = seq;
-        pendingPercent = null;
-        try {
-          const res = await setter(target);
-          if (!destroyed && mySeq === seq && pendingPercent === null) {
-            onCommit(res, target);
-          }
-        } catch (err) {
-          if (!destroyed && mySeq === seq && pendingPercent === null) {
-            onRollback(err, target);
-          }
-          break;
-        }
+      while (!dead && pend !== null) {
+        clr(); const t = pend, s = seq; pend = null;
+        try { const r = await setter(t); if (!dead && s === seq && pend === null) onCommit(r, t); }
+        catch (e) { if (dead) break; if (pend !== null) continue; if (s === seq) onRollback(e, t); break; }
       }
-    } finally {
-      inFlight = false;
-      if (!destroyed) onSyncChange(pendingPercent !== null);
-    }
+    } finally { busy = false; if (!dead) onSyncChange(pend !== null); }
   }
-
-  function schedule(percent, { immediate = false } = {}) {
-    if (destroyed) return;
-    const target = clampPercent(percent);
-    seq += 1;
-    pendingPercent = target;
-    onOptimistic(target);
-    onSyncChange(true);
-
-    if (immediate) {
-      flush();
-      return;
-    }
-
-    clearDebounce();
-    debounceTimer = setTimer(() => {
-      debounceTimer = null;
-      flush();
-    }, debounceMs);
-  }
-
-  function isSyncing() {
-    return inFlight || pendingPercent !== null || debounceTimer !== null;
-  }
-
-  function destroy() {
-    destroyed = true;
-    pendingPercent = null;
-    clearDebounce();
-  }
-
-  return { schedule, flush, isSyncing, destroy };
+  return {
+    schedule(pct, { immediate = false } = {}) {
+      if (dead) return;
+      const t = clampPercent(pct); seq += 1; pend = t; onOptimistic(t); onSyncChange(true);
+      if (immediate) return flush();
+      clr(); tid = setTimer(() => { tid = null; flush(); }, debounceMs);
+    },
+    flush,
+    isSyncing: () => busy || pend !== null || tid !== null,
+    destroy() { dead = true; pend = null; clr(); },
+  };
 }

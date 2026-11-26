@@ -3,19 +3,7 @@ use crate::state::Settings;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CpuTopology {
-    pub total: u32,
-    pub performance_cores: u32,
-    pub efficiency_cores: u32,
-}
-
-impl CpuTopology {
-    pub fn is_heterogeneous(&self) -> bool {
-        self.performance_cores > 0
-    }
-}
+pub use crate::platform::macos::CpuTopology;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,7 +57,7 @@ pub fn apply_profile_defaults(
         "strict" => ("strict".to_string(), 1, "-b".to_string(), 19),
         "eco" => {
             let mut max_jobs = if is_hetero {
-                topo.efficiency_cores.max(1).min(2)
+                topo.efficiency_cores.clamp(1, 2)
             } else if total >= 4 {
                 2
             } else {
@@ -86,7 +74,12 @@ pub fn apply_profile_defaults(
             } else {
                 (total / 2).max(2).min(total)
             };
-            ("utility".to_string(), max_jobs, "-c utility".to_string(), 10)
+            (
+                "utility".to_string(),
+                max_jobs,
+                "-c utility".to_string(),
+                10,
+            )
         }
         _ => ("normal".to_string(), total, String::new(), 0),
     }
@@ -237,6 +230,7 @@ pub fn format_thermal(
     lang: Lang,
 ) -> String {
     let p_str = match (lang, thermal_pressure) {
+        (Lang::ZhCn, "unknown") => "未知",
         (Lang::ZhCn, "nominal") => "正常 (nominal)",
         (Lang::ZhCn, "fair") => "轻度温升 (fair)",
         (Lang::ZhCn, "serious") => "偏高降频 (serious)",
@@ -263,9 +257,7 @@ pub fn format_thermal(
 pub fn format_profile(policy: &Policy, topo: &CpuTopology, lang: Lang) -> String {
     let hetero = topo.is_heterogeneous();
     match (lang, policy.profile.as_str(), hetero) {
-        (Lang::ZhCn, "strict", true) => {
-            "强限保护模式（E-Core + I/O 限流，单并发）".to_string()
-        }
+        (Lang::ZhCn, "strict", true) => "强限保护模式（E-Core + I/O 限流，单并发）".to_string(),
         (Lang::ZhCn, "strict", false) => {
             "强限保护模式（Background QoS + nice + I/O 限流，单并发）".to_string()
         }
@@ -295,7 +287,10 @@ pub fn format_profile(policy: &Policy, topo: &CpuTopology, lang: Lang) -> String
             "Strict thermal protection (Background QoS + nice + I/O throttle, 1 job)".to_string()
         }
         (Lang::En, "eco", true) => {
-            format!("Eco clamshell mode (E-Core pinned, up to {} jobs)", policy.max_jobs)
+            format!(
+                "Eco clamshell mode (E-Core pinned, up to {} jobs)",
+                policy.max_jobs
+            )
         }
         (Lang::En, "eco", false) => {
             format!(
@@ -345,7 +340,8 @@ mod tests {
         let envs = build_env_vars(&p);
         assert_eq!(envs.get("NINJAJOBS").map(String::as_str), Some("2"));
         assert_eq!(
-            envs.get("PYTEST_XDIST_AUTO_NUM_WORKERS").map(String::as_str),
+            envs.get("PYTEST_XDIST_AUTO_NUM_WORKERS")
+                .map(String::as_str),
             Some("2")
         );
 
