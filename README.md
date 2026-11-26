@@ -79,6 +79,24 @@ mac-clamshell-mcp guard uninstall
 mac-clamshell-mcp watch --daemon --interval 10
 ```
 
+## AI Agent Integration
+
+- **Antigravity**: One-line installer above installs the MCP server, hooks, live panel, and `skills/mac-clamshell/SKILL.md` automatically.
+- **Claude Code / Codex / Cursor / OpenCode (any MCP client or shell agent)**: Add the portable skill [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md) (or `npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp`) and configure stdio MCP (or invoke `mac-clamshell-mcp status` / `run` directly):
+
+```json
+{
+  "mcpServers": {
+    "mac-clamshell-mcp": {
+      "command": "/path/to/mac-clamshell-mcp",
+      "args": ["serve", "--data-dir", "/path/to/mac-clamshell-data", "--panel-html", "/path/to/panel.html"]
+    }
+  }
+}
+```
+
+- **LLM index & coding-agent guide**: [`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
+
 ## Build from source
 
 Requires macOS, Rust (`cargo`), and Node.js 20+:

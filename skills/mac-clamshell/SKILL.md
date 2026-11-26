@@ -26,3 +26,7 @@ Binary: `~/.gemini/config/plugins/mac-clamshell-mcp/bin/mac-clamshell-mcp` (writ
   - `eco` (lid closed + Battery): `taskpolicy -c background`, `nice 15`, `max_jobs <= 2` (`1` at `<= 20%` battery); run sequentially, prefer incremental builds/tests, avoid parallel fan-outs.
   - `strict` (thermal warning/throttle): `taskpolicy -b`, `nice 19`, `max_jobs=1`; do not start new heavy compute without alerting the user and letting the Mac cool down.
 - **Tools & user overrides**: Use `clamshell_panel` for status/dashboard, `clamshell_set_brightness` (or `brightness set <0..100>`, safely updates wake-restore target while closed), and `clamshell_lock_screen` (or `lock`, **only when explicitly requested**) to lock without sleeping. If the user explicitly asks for full speed on a task, comply and briefly note that throttling was bypassed.
+
+## Cross-Client Setup
+
+Any stdio MCP client (Antigravity, Claude Code, Codex, Cursor, OpenCode) can connect via `mac-clamshell-mcp serve --data-dir <dir> --panel-html <panel.html>`, or call `mac-clamshell-mcp status` / `run` directly from shell tools without MCP.

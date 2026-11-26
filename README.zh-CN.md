@@ -79,6 +79,24 @@ mac-clamshell-mcp guard uninstall
 mac-clamshell-mcp watch --daemon --interval 10
 ```
 
+## AI Agent 接入指南
+
+- **Antigravity**：执行上方一键安装脚本即自动注册 MCP 服务、生命周期钩子、实时面板与 [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md)。
+- **Claude Code / Codex / Cursor / OpenCode（任意 MCP 或终端 Agent）**：加载通用 Skill [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md)（或运行 `npx skills add eatingDream-antigravity-plugins/mac-clamshell-mcp`），按下方配置 stdio MCP，或在终端直接调用 `mac-clamshell-mcp status` / `run`：
+
+```json
+{
+  "mcpServers": {
+    "mac-clamshell-mcp": {
+      "command": "/path/to/mac-clamshell-mcp",
+      "args": ["serve", "--data-dir", "/path/to/mac-clamshell-data", "--panel-html", "/path/to/panel.html"]
+    }
+  }
+}
+```
+
+- **LLM 索引与协作指南**：[`llms.txt`](llms.txt) · [`AGENTS.md`](AGENTS.md)
+
 ## 从源码构建
 
 需要 macOS、Rust（`cargo`）和 Node.js 20+：
