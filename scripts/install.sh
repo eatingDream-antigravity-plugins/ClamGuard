@@ -133,7 +133,7 @@ if [ ! -f "${STAGE}/bin/mac-clamshell-mcp" ] || [ ! -f "${STAGE}/plugin.json" ];
   exit 1
 fi
 
-mkdir -p "${DEST}/bin" "${DEST}/scripts" "${DEST}/panel/dist" "${DEST}/rules" "${DEST}/skills/mac-clamshell" "${DEST}/assets"
+mkdir -p "${DEST}/bin" "${DEST}/scripts" "${DEST}/panel/dist" "${DEST}/rules" "${DEST}/skills/mac-clamshell" "${DEST}/assets" "${DEST}/docs"
 
 # Atomic binary swap so a running MCP server never sees a truncated executable
 cp "${STAGE}/bin/mac-clamshell-mcp" "${DEST}/bin/mac-clamshell-mcp.new"
@@ -152,6 +152,8 @@ cp "${STAGE}/hooks.json" "${DEST}/hooks.json"
 cp "${STAGE}/rules/AGENTS.md" "${DEST}/rules/AGENTS.md"
 cp "${STAGE}/skills/mac-clamshell/SKILL.md" "${DEST}/skills/mac-clamshell/SKILL.md"
 cp "${STAGE}/assets/logo.svg" "${DEST}/assets/logo.svg"
+[ -f "${STAGE}/docs/ai-guide.md" ] && cp "${STAGE}/docs/ai-guide.md" "${DEST}/docs/ai-guide.md"
+[ -f "${STAGE}/llms.txt" ] && cp "${STAGE}/llms.txt" "${DEST}/llms.txt"
 [ -f "${STAGE}/LICENSE" ] && cp "${STAGE}/LICENSE" "${DEST}/LICENSE"
 [ -f "${STAGE}/README.md" ] && cp "${STAGE}/README.md" "${DEST}/README.md"
 [ -f "${STAGE}/README.zh-CN.md" ] && cp "${STAGE}/README.zh-CN.md" "${DEST}/README.zh-CN.md"

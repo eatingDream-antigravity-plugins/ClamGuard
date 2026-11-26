@@ -3,13 +3,13 @@ export const POLL_INTERVAL_FAST_MS = 3e3, POLL_INTERVAL_MED_MS = 5e3, POLL_INTER
 export const BG_POLL_INTERVAL_FAST_MS = 6e3, BG_POLL_INTERVAL_MED_MS = 1e4, BG_POLL_INTERVAL_SLOW_MS = 18e3, BG_POLL_INTERVAL_ULTRA_SLOW_MS = 3e4;
 export const POLL_INTERVAL_MAX_BACKOFF_MS = 12e4, RTT_MED_THRESHOLD_MS = 150, RTT_HIGH_THRESHOLD_MS = 350, RTT_VERY_HIGH_THRESHOLD_MS = 800;
 export const REVEAL_THROTTLE_MS = 250, POINTER_STALE_MS = 900;
-const NOOP = () => {}, resNull = () => Promise.resolve(null);
+const NOOP = () => {}, resNull = () => Promise.resolve(null), M = Math;
 
 export function computeAdaptiveIntervalMs({ rttMs = 0, consecutiveErrors = 0, hidden = false } = {}) {
   const r = Number.isFinite(rttMs) && rttMs > 0 ? rttMs : 0;
   const base = (hidden ? [6e3, 1e4, 18e3, 3e4] : [3e3, 5e3, 1e4, 2e4])[r > 800 ? 3 : r > 350 ? 2 : r > 150 ? 1 : 0];
-  const errs = Math.max(0, Math.floor(+consecutiveErrors || 0));
-  return errs <= 0 ? base : Math.min(12e4, base * (1 << Math.min(errs, 4)));
+  const errs = M.max(0, M.floor(+consecutiveErrors || 0));
+  return errs <= 0 ? base : M.min(12e4, base * (1 << M.min(errs, 4)));
 }
 
 export function createAdaptivePoller({
@@ -27,9 +27,9 @@ export function createAdaptivePoller({
   const recomp = (ov) => { inBackground = ov !== undefined ? !!ov : !!isHidden(); currentIntervalMs = computeAdaptiveIntervalMs({ rttMs: ewmaRttMs ?? 0, consecutiveErrors, hidden: inBackground }); };
   const cancel = () => { if (tid !== null) { clearTimer(tid); tid = null; } };
   const sample = (tot, srv) => {
-    lastTotalMs = Math.max(0, Math.round(+tot || 0)); lastServerMs = Math.max(0, Math.round(+srv || 0));
-    lastNetRttMs = Math.max(0, lastTotalMs - lastServerMs);
-    ewmaRttMs = ewmaRttMs === null ? lastNetRttMs : Math.round(ewmaRttMs * 0.65 + lastNetRttMs * 0.35);
+    lastTotalMs = M.max(0, M.round(+tot || 0)); lastServerMs = M.max(0, M.round(+srv || 0));
+    lastNetRttMs = M.max(0, lastTotalMs - lastServerMs);
+    ewmaRttMs = ewmaRttMs === null ? lastNetRttMs : M.round(ewmaRttMs * 0.65 + lastNetRttMs * 0.35);
     recomp();
   };
 

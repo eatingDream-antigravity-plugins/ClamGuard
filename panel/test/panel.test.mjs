@@ -26,7 +26,7 @@ import {
   clampPercent,
   createBrightnessController,
 } from "../brightness.js";
-import { applyHostStyleVariables, parseColorLum } from "../bridge.js";
+import { App, applyHostStyleVariables, parseColorLum } from "../bridge.js";
 import {
   computeOptimisticState,
   describeFanState,
@@ -337,6 +337,10 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
       "#14131180",
       "#0000",
       "hsla(0, 0%, 0%, 0)",
+      "color-mix(in srgb, transparent 50%, black)",
+      "var(--unknown-bg)",
+      "currentColor",
+      "red",
       "   ",
     ]) {
       applyHostStyleVariables({ "--color-background-primary": badBg }, fakeEl);
@@ -346,6 +350,11 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
         `expected ${JSON.stringify(badBg)} to be ignored`
       );
     }
+
+    applyHostStyleVariables({ "--color-background-primary": "black" }, fakeEl);
+    assert.equal(props.get("--color-background-primary"), "black");
+    applyHostStyleVariables({ "--color-background-primary": "white" }, fakeEl);
+    assert.equal(props.get("--color-background-primary"), "white");
 
     applyHostStyleVariables({ "--color-background-primary": "rgba(20, 19, 17, 0.95)" }, fakeEl);
     assert.equal(props.get("--color-background-primary"), "rgba(20, 19, 17, 0.95)");
@@ -1076,5 +1085,135 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     assert.equal(closedAc.policy.autoProfile, "eco");
     assert.equal(closedAc.policy.profile, "eco");
     assert.equal(closedAc.policy.maxJobs, 1);
+  });
+
+  it("bridge rejects top-level self-parent, scopes progress resets with maxTimeoutMs, enforces connEpoch & serverTools", async () => {
+    // 1. Reject window.parent === window (top-level self-messages)
+    const selfWin = {
+      addEventListener() {},
+      removeEventListener() {},
+      postMessage() {
+        throw new Error("should never post to self");
+      },
+    };
+    selfWin.parent = selfWin;
+    const topLevelApp = new App({ name: "Test", version: "1.4.0" }, {}, { window: selfWin, document: null });
+    await assert.rejects(() => topLevelApp.connect(), /parent/i);
+
+    // 2. Handshake retry + connEpoch fencing + bridge-level hasServerTools() check + progressToken scoping
+    const listeners = new Map();
+    const mkWin = (parent) => ({
+      parent,
+      addEventListener(t, fn) {
+        if (!listeners.has(t)) listeners.set(t, []);
+        listeners.get(t).push(fn);
+      },
+      removeEventListener(t, fn) {
+        listeners.set(t, (listeners.get(t) || []).filter((f) => f !== fn));
+      },
+    });
+    const emit = (ev) => {
+      for (const fn of listeners.get("message") || []) fn(ev);
+    };
+
+    let initAttempt = 0;
+    const parent = {
+      postMessage(msg) {
+        if (msg.method === "ui/initialize") {
+          initAttempt += 1;
+          const reply =
+            initAttempt === 1
+              ? { jsonrpc: "2.0", id: msg.id, error: { code: -32000, message: "transient" } }
+              : {
+                  jsonrpc: "2.0",
+                  id: msg.id,
+                  result: {
+                    protocolVersion: "2026-01-26",
+                    hostCapabilities: {},
+                    hostContext: { theme: "dark" },
+                  },
+                };
+          setImmediate(() => emit({ source: parent, data: reply }));
+        }
+      },
+    };
+    const appNoTools = new App(
+      { name: "Test", version: "1.4.0" },
+      {},
+      { window: mkWin(parent), document: null }
+    );
+    await appNoTools.connect({ retries: 1, retryDelayMs: 5 });
+    assert.equal(initAttempt, 2);
+    assert.equal(appNoTools.hasServerTools(), false);
+    await assert.rejects(
+      () => appNoTools.callServerTool({ name: "clamshell_refresh", arguments: {} }),
+      /serverTools/i
+    );
+    appNoTools.close();
+
+    // 3. connEpoch fencing: closing mid-connect rejects with Closed and ignores late reply
+    let lateInitId = null;
+    const slowParent = {
+      postMessage(msg) {
+        if (msg.method === "ui/initialize") lateInitId = msg.id;
+      },
+    };
+    const fenced = new App(
+      { name: "Test", version: "1.4.0" },
+      {},
+      { window: mkWin(slowParent), document: null }
+    );
+    const pendingConn = fenced.connect({ retries: 0, timeoutMs: 5_000 });
+    fenced.close();
+    await assert.rejects(() => pendingConn, /Closed/);
+    emit({
+      source: slowParent,
+      data: {
+        jsonrpc: "2.0",
+        id: lateInitId,
+        result: { protocolVersion: "2026-01-26", hostCapabilities: { serverTools: {} }, hostContext: {} },
+      },
+    });
+    assert.equal(fenced.isConnected(), false);
+
+    // 4. progressToken scoping + maxTimeoutMs hard cap
+    const progParent = {
+      postMessage(msg) {
+        if (msg.method === "ui/initialize") {
+          setImmediate(() =>
+            emit({
+              source: progParent,
+              data: {
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: { protocolVersion: "2026-01-26", hostCapabilities: { serverTools: {} }, hostContext: {} },
+              },
+            })
+          );
+        }
+      },
+    };
+    const progApp = new App(
+      { name: "Test", version: "1.4.0" },
+      {},
+      { window: mkWin(progParent), document: null }
+    );
+    await progApp.connect();
+    const p1 = progApp.request("tools/call", { _meta: { progressToken: "tok-a" } }, { timeoutMs: 40, maxTimeoutMs: 75 });
+    const p2 = progApp.request("tools/call", { _meta: { progressToken: "tok-b" } }, { timeoutMs: 30, maxTimeoutMs: 120 });
+    // Send progress only for tok-a: tok-b must still expire near 30ms, and tok-a must still hit maxTimeoutMs cap!
+    const interval = setInterval(() => {
+      emit({
+        source: progParent,
+        data: { jsonrpc: "2.0", method: "notifications/progress", params: { progressToken: "tok-a", progress: 1 } },
+      });
+    }, 15);
+    try {
+      await assert.rejects(() => p2, /Timeout/);
+      await assert.rejects(() => p1, /Timeout/);
+    } finally {
+      clearInterval(interval);
+      progApp.close();
+    }
   });
 });

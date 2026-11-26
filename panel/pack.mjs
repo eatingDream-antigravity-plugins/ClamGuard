@@ -135,6 +135,7 @@ const template = fs
   .readFileSync(templatePath, "utf8")
   .replace(/>\s+</g, "><")
   .replace(/\r?\n/g, "")
+  .replace(/(<meta name="app-version"[^>]*><!-- x-release-please-version -->)/, "\n$1\n")
   .trim();
 
 if (!template.includes(BOOT_TOKEN)) {

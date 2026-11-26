@@ -7,7 +7,7 @@ Complete operational reference for AI coding agents and advanced users configuri
 | Profile | Activation Condition | CPU QoS & Nice | Concurrency Cap (`max_jobs`) |
 | :--- | :--- | :--- | :--- |
 | `normal` | Lid open & nominal/fair thermals | None | Uncapped (all logical cores) |
-| `utility` | Lid closed + AC power | `taskpolicy -c utility`, `nice 10` | E-cores clamped `2..4` (Intel: half of cores, clamped `2..4`) |
+| `utility` | Lid closed + AC power | `taskpolicy -c utility`, `nice 10` | E-cores clamped `2..4` (Intel: `max(2, total / 2)`, capped at `total`) |
 | `eco` | Lid closed + battery power | `taskpolicy -c background`, `nice 15` | `<= 2` (`1` when battery `<= 20%`) |
 | `strict` | Serious or critical thermal pressure | `taskpolicy -b`, `nice 19` | `1` (serial execution) |
 
@@ -36,10 +36,10 @@ SEP-1865 MCP Apps UI requires client `capabilities.extensions["io.modelcontextpr
 - **Public tools (all MCP sessions)**:
   - `clamshell_panel` (`{ fresh?: boolean }`): Opens the live dashboard and returns current lid, power, thermal, fan, display, guard, and throttling telemetry.
   - `clamshell_set_brightness` (`{ percent: 0..100 }`): Sets built-in display brightness only when hardware confirms lid open and built-in display awake; otherwise safely updates the wake-restore target without lighting the screen.
-  - `clamshell_lock_screen` (`{}`): Locks the macOS screen immediately without sleeping background tasks (`SACLockScreenImmediate` -> `CGSession -suspend` -> `pmset displaysleepnow`). Polls `CGSSessionScreenIsLocked` and returns `{ ok, method, verified, status: "verified" | "submitted", locked_at_ms }`; `pmset` fallback fails unless session lock is verified.
+  - `clamshell_lock_screen` (`{}`): Locks the macOS screen immediately without sleeping background tasks (`SACLockScreenImmediate` -> `CGSession -suspend` -> `pmset displaysleepnow`). Polls `CGSSessionScreenIsLocked` and returns `{ ok, method, verified, status: "verified" | "submitted", locked_at_ms, serverMs }`; `pmset` fallback fails unless session lock is verified.
 - **App-only tools (enforced in both `tools/list` and `tools/call` — only available after SEP-1865 UI negotiation)**:
-  - `clamshell_refresh` (`{ ifHash?: string, force?: boolean, fresh?: boolean }`)
-  - `clamshell_configure` (`{ modeOverride?, maxJobsOverride?, acClosedProfile?, guardEnabled?, thermalBrightCapPct?, lang? }`)
+  - `clamshell_refresh` (`{ ifHash?: string (maxLength: 64), force?: boolean, fresh?: boolean }`)
+  - `clamshell_configure` (`{ modeOverride?: "auto" | "eco" | "utility" | "strict" | "normal", maxJobsOverride?: integer (0..64), acClosedProfile?: "utility" | "eco", guardEnabled?: boolean, thermalBrightCapPct?: integer (0..100), lang?: "auto" | "en" | "zh-CN" }`)
 
 ### Telemetry Accuracy Notes
 
@@ -69,6 +69,6 @@ Requires macOS, Rust (`cargo`), and Node.js 20+:
 ```sh
 git clone https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp.git
 cd mac-clamshell-mcp
-(cd panel && npm install) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
-cargo test --locked && cargo build --release --locked && ./scripts/install-plugin.sh
+(cd panel && npm ci --ignore-scripts) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
+cargo test --locked && ./scripts/install-plugin.sh
 ```

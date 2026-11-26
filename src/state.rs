@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -59,7 +59,32 @@ pub fn resolve_data_dir(cli_override: Option<&Path>) -> PathBuf {
 }
 
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("refusing symlink directory: {}", dir.display()),
+                ));
+            }
+            if !meta.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("path is not a directory: {}", dir.display()),
+                ));
+            }
+            if (meta.permissions().mode() & 0o777) != 0o700 {
+                fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn settings_path(data_dir: &Path) -> PathBuf {
@@ -134,7 +159,7 @@ impl Default for Settings {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsPatch {
     pub mode_override: Option<String>,
     pub max_jobs_override: Option<i64>,
@@ -142,6 +167,56 @@ pub struct SettingsPatch {
     pub guard_enabled: Option<bool>,
     pub thermal_bright_cap_pct: Option<i64>,
     pub lang: Option<String>,
+}
+
+impl SettingsPatch {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(m) = self.mode_override.as_deref() {
+            if !VALID_MODES.contains(&m) {
+                return Err(format!(
+                    "invalid modeOverride {:?}; expected one of: {}",
+                    m,
+                    VALID_MODES.join(", ")
+                ));
+            }
+        }
+        if let Some(j) = self.max_jobs_override {
+            if !(0..=64).contains(&j) {
+                return Err(format!(
+                    "invalid maxJobsOverride {j}; expected integer in 0..=64"
+                ));
+            }
+        }
+        if let Some(a) = self.ac_closed_profile.as_deref() {
+            if !VALID_AC_PROFILES.contains(&a) {
+                return Err(format!(
+                    "invalid acClosedProfile {:?}; expected one of: {}",
+                    a,
+                    VALID_AC_PROFILES.join(", ")
+                ));
+            }
+        }
+        if let Some(cap) = self.thermal_bright_cap_pct {
+            if !(0..=100).contains(&cap) {
+                return Err(format!(
+                    "invalid thermalBrightCapPct {cap}; expected integer in 0..=100"
+                ));
+            }
+        }
+        if let Some(ref raw_lang) = self.lang {
+            let trimmed = raw_lang.trim();
+            if !(trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("auto")
+                || matches!(trimmed, "en" | "zh-CN" | "zh" | "zh_CN"))
+            {
+                return Err(format!(
+                    "invalid lang {:?}; expected one of: auto, en, zh-CN",
+                    raw_lang
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn read_settings(data_dir: &Path) -> Settings {
@@ -195,36 +270,31 @@ pub fn read_settings(data_dir: &Path) -> Settings {
 }
 
 pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Settings> {
+    patch
+        .validate()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let _lock = FileLock::acquire_path(&data_dir.join("settings.lock"), true)?;
     let mut next = read_settings(data_dir);
     if let Some(m) = patch.mode_override.as_deref() {
-        if VALID_MODES.contains(&m) {
-            next.mode_override = m.to_string();
-        }
+        next.mode_override = m.to_string();
     }
     if let Some(j) = patch.max_jobs_override {
-        if (0..=64).contains(&j) {
-            next.max_jobs_override = j as u32;
-        }
+        next.max_jobs_override = j as u32;
     }
     if let Some(a) = patch.ac_closed_profile.as_deref() {
-        if VALID_AC_PROFILES.contains(&a) {
-            next.ac_closed_profile = a.to_string();
-        }
+        next.ac_closed_profile = a.to_string();
     }
     if let Some(g) = patch.guard_enabled {
         next.guard_enabled = g;
     }
     if let Some(cap) = patch.thermal_bright_cap_pct {
-        if (0..=100).contains(&cap) {
-            next.thermal_bright_cap_pct = cap as u8;
-        }
+        next.thermal_bright_cap_pct = cap as u8;
     }
     if let Some(ref raw_lang) = patch.lang {
         let trimmed = raw_lang.trim();
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
             next.lang = None;
-        } else if matches!(trimmed, "en" | "zh-CN" | "zh" | "zh_CN") {
+        } else {
             next.lang = crate::i18n::normalize_setting_lang(trimmed);
         }
     }
@@ -452,16 +522,42 @@ pub struct DaemonLock {
 
 impl DaemonLock {
     pub fn try_acquire(data_dir: &Path) -> io::Result<Option<Self>> {
-        Ok(FileLock::acquire_path(&daemon_lock_path(data_dir), false)?
-            .map(|lock| Self { _lock: lock }))
+        let path = daemon_lock_path(data_dir);
+        for attempt in 0..=3 {
+            if let Some(lock) = FileLock::acquire_path(&path, false)? {
+                return Ok(Some(Self { _lock: lock }));
+            }
+            if attempt < 3 {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        Ok(None)
     }
 
     pub fn is_active(data_dir: &Path) -> bool {
         let path = daemon_lock_path(data_dir);
-        if !path.exists() {
+        let Ok(file) = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        else {
             return false;
+        };
+        let fd = file.as_raw_fd();
+        loop {
+            if unsafe { libc::flock(fd, libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+                unsafe {
+                    libc::flock(fd, libc::LOCK_UN);
+                }
+                return false;
+            }
+            let err = io::Error::last_os_error();
+            match err.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => return true,
+                _ => return false,
+            }
         }
-        matches!(Self::try_acquire(data_dir), Ok(None))
     }
 }
 
@@ -695,20 +791,54 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600);
 
-        // Invalid values are ignored safely
-        let s2 = write_settings(
-            &dir,
-            &SettingsPatch {
+        // Invalid values and unknown fields are rejected without mutating settings.json
+        for bad_patch in [
+            SettingsPatch {
                 mode_override: Some("bogus".into()),
-                max_jobs_override: Some(999),
-                ac_closed_profile: Some("bogus".into()),
-                guard_enabled: None,
-                thermal_bright_cap_pct: Some(250),
-                lang: Some("bogus".into()),
+                ..SettingsPatch::default()
             },
-        )
-        .unwrap();
-        assert_eq!(s2, s);
+            SettingsPatch {
+                max_jobs_override: Some(999),
+                ..SettingsPatch::default()
+            },
+            SettingsPatch {
+                max_jobs_override: Some(-1),
+                ..SettingsPatch::default()
+            },
+            SettingsPatch {
+                ac_closed_profile: Some("bogus".into()),
+                ..SettingsPatch::default()
+            },
+            SettingsPatch {
+                thermal_bright_cap_pct: Some(250),
+                ..SettingsPatch::default()
+            },
+            SettingsPatch {
+                lang: Some("bogus".into()),
+                ..SettingsPatch::default()
+            },
+        ] {
+            let err = write_settings(&dir, &bad_patch).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+        assert!(serde_json::from_str::<SettingsPatch>(r#"{"unknownField": 1}"#).is_err());
+        assert_eq!(read_settings(&dir), s);
+
+        // ensure_private_dir tightens existing 0o755 dirs to 0o700 and refuses symlinks
+        let loose_dir = dir.join("loose");
+        fs::create_dir(&loose_dir).unwrap();
+        fs::set_permissions(&loose_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_dir(&loose_dir).unwrap();
+        assert_eq!(
+            fs::metadata(&loose_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let sym_dir = dir.join("sym-dir");
+        std::os::unix::fs::symlink(&loose_dir, &sym_dir).unwrap();
+        assert_eq!(
+            ensure_private_dir(&sym_dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
 
         let s3 = write_settings(
             &dir,
@@ -733,13 +863,31 @@ mod tests {
         assert_eq!(reserialized["last_lid"], "closed");
         assert_eq!(reserialized["saved_brightness"], 0.72);
 
-        // DaemonLock enforces exclusive guard daemon ownership and accurate observer detection
+        // DaemonLock enforces exclusive guard daemon ownership and lock-free concurrent readers
         assert!(!DaemonLock::is_active(&dir));
         let dlock = DaemonLock::try_acquire(&dir).unwrap().unwrap();
         assert!(DaemonLock::is_active(&dir));
         assert!(DaemonLock::try_acquire(&dir).unwrap().is_none());
         drop(dlock);
         assert!(!DaemonLock::is_active(&dir));
+
+        // Concurrent read-only LOCK_SH probes must never falsely report active when no daemon runs
+        let readers = 12;
+        let barrier = std::sync::Barrier::new(readers);
+        std::thread::scope(|scope| {
+            for _ in 0..readers {
+                let (dir, barrier) = (&dir, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..64 {
+                        assert!(
+                            !DaemonLock::is_active(dir),
+                            "concurrent LOCK_SH probes must never falsely report active"
+                        );
+                    }
+                });
+            }
+        });
 
         let _ = fs::remove_dir_all(&dir);
     }

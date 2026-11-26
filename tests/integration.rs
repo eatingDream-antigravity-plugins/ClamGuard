@@ -1024,3 +1024,196 @@ fn surviving_mcp_server_takes_over_daemon_lock_and_unloaded_plist_reports_idle()
     let _ = proc_b.wait();
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn sanitization_guard_catches_synthetic_tokens_without_echoing_and_fails_closed() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let patterns_src = repo_root.join(".github/sanitize-patterns.txt");
+    let script_src = repo_root.join("scripts/check_sanitized.sh");
+    let dir = temp_data_dir("sanitize-guard");
+
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&dir)
+        .status()
+        .unwrap()
+        .success());
+    fs::create_dir_all(dir.join(".github")).unwrap();
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::copy(&patterns_src, dir.join(".github/sanitize-patterns.txt")).unwrap();
+    fs::copy(&script_src, dir.join("scripts/check_sanitized.sh")).unwrap();
+    assert!(Command::new("git")
+        .args([
+            "add",
+            ".github/sanitize-patterns.txt",
+            "scripts/check_sanitized.sh"
+        ])
+        .current_dir(&dir)
+        .status()
+        .unwrap()
+        .success());
+
+    // 1. Clean repo passes
+    let clean = Command::new("bash")
+        .arg("scripts/check_sanitized.sh")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        clean.status.success(),
+        "expected clean repo to pass: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+
+    // 2. Dynamically constructed synthetic tokens (never stored as literals in source)
+    let akia_tok = format!("{}{}0123456789ABCDEF", "AK", "IA");
+    let ghp_tok = format!("{}{}{}", "gh", "p_", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8");
+    let sk_tok = format!("{}{}{}", "sk", "-proj-", "AbCdEfGhIjKlMnOpQrStUvWxYz012345");
+
+    for (name, token) in [
+        ("akia.txt", akia_tok),
+        ("ghp.txt", ghp_tok),
+        ("sk.txt", sk_tok),
+    ] {
+        let sample = dir.join(name);
+        fs::write(&sample, format!("export TOKEN={token}\n")).unwrap();
+        assert!(Command::new("git")
+            .args(["add", name])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+
+        // Tracked + staged detection, printing ONLY file:line and zero secret text
+        let res = Command::new("bash")
+            .arg("scripts/check_sanitized.sh")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            res.status.code(),
+            Some(1),
+            "token {name} must fail with exit 1"
+        );
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&res.stdout),
+            String::from_utf8_lossy(&res.stderr)
+        );
+        assert!(
+            combined.contains(&format!("{name}:1")),
+            "expected {name}:1 in output, got: {combined}"
+        );
+        assert!(
+            !combined.contains(&token),
+            "secret token text must NEVER be echoed in output: {combined}"
+        );
+
+        // Overwrite working tree to clean while secret stays staged -> still caught via --cached
+        fs::write(&sample, "clean = true\n").unwrap();
+        let staged_res = Command::new("bash")
+            .arg("scripts/check_sanitized.sh")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert_eq!(
+            staged_res.status.code(),
+            Some(1),
+            "staged-only secret {name} must still fail with exit 1"
+        );
+        let staged_combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&staged_res.stdout),
+            String::from_utf8_lossy(&staged_res.stderr)
+        );
+        assert!(staged_combined.contains(&format!("{name}:1")));
+        assert!(!staged_combined.contains(&token));
+
+        assert!(Command::new("git")
+            .args(["rm", "-fq", name])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    // 3. Fail-closed (exit 2) on empty patterns or invalid regex
+    fs::write(
+        dir.join(".github/sanitize-patterns.txt"),
+        "# only comments\n\n",
+    )
+    .unwrap();
+    let empty_res = Command::new("bash")
+        .arg("scripts/check_sanitized.sh")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(empty_res.status.code(), Some(2));
+
+    fs::write(
+        dir.join(".github/sanitize-patterns.txt"),
+        "[unclosed_regex\n",
+    )
+    .unwrap();
+    let bad_re_res = Command::new("bash")
+        .arg("scripts/check_sanitized.sh")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(bad_re_res.status.code(), Some(2));
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn mcp_stdio_caps_oversize_lines_and_freezes_session_on_duplicate_initialize() {
+    let dir = temp_data_dir("mcp-hardening");
+    let mut child = mock_command(&dir, "serve")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let mut send = |raw: &str| -> Value {
+        writeln!(stdin, "{raw}").unwrap();
+        stdin.flush().unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+
+    // 1. Initialize on 2025-06-18 (non-apps)
+    let init1 = send(
+        &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}).to_string(),
+    );
+    assert_eq!(init1["result"]["protocolVersion"], "2025-06-18");
+
+    // 2. Duplicate initialize rejected with -32600
+    let init2 = send(
+        &json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":app_capabilities()}}).to_string(),
+    );
+    assert_eq!(init2["error"]["code"], -32600);
+
+    // 3. Batch array rejected on 2025-06-18
+    let batch = send(&json!([{"jsonrpc":"2.0","id":3,"method":"ping"}]).to_string());
+    assert_eq!(batch["error"]["code"], -32600);
+
+    // 4. Oversize >1 MiB line rejected with -32600 and server stays healthy for next ping
+    let huge = format!(
+        r#"{{"jsonrpc":"2.0","id":4,"method":"ping","params":{{"pad":"{}"}}}}"#,
+        "a".repeat(1024 * 1024 + 64)
+    );
+    let too_big = send(&huge);
+    assert_eq!(too_big["error"]["code"], -32600);
+
+    let ping = send(&json!({"jsonrpc":"2.0","id":5,"method":"ping"}).to_string());
+    assert_eq!(ping["id"], 5);
+    assert_eq!(ping["result"], json!({}));
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    fs::remove_dir_all(dir).unwrap();
+}

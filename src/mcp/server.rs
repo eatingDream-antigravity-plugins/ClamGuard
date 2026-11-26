@@ -14,23 +14,116 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const DEFAULT_SERVE_GUARD_INTERVAL_MS: u64 = 5_000;
+pub const MAX_STDIN_LINE_BYTES: usize = 1024 * 1024;
 
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
 const UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
 
-#[derive(Default)]
 pub struct McpSession {
     apps_capable: bool,
+    protocol_version: &'static str,
+    initialized: bool,
 }
 
-fn invalid_request_err(message: &str) -> Value {
+impl Default for McpSession {
+    fn default() -> Self {
+        Self {
+            apps_capable: false,
+            protocol_version: LATEST_PROTOCOL_VERSION,
+            initialized: false,
+        }
+    }
+}
+
+impl McpSession {
+    pub fn supports_jsonrpc_batch(&self) -> bool {
+        matches!(self.protocol_version, "2025-03-26" | "2024-11-05")
+    }
+}
+
+fn jsonrpc_err(id: Value, code: i64, message: impl Into<String>) -> Value {
     json!({
         "jsonrpc": "2.0",
-        "id": Value::Null,
-        "error": { "code": -32600, "message": message }
+        "id": id,
+        "error": { "code": code, "message": message.into() }
     })
+}
+
+fn invalid_request_err(message: impl Into<String>) -> Value {
+    jsonrpc_err(Value::Null, -32600, message)
+}
+
+fn is_valid_mcp_id(val: &Value) -> bool {
+    match val {
+        Value::String(_) => true,
+        Value::Number(n) => n.is_i64() || n.is_u64(),
+        _ => false,
+    }
+}
+
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    if let Some(req) = requested {
+        for &supported in SUPPORTED_PROTOCOL_VERSIONS {
+            if supported == req {
+                return supported;
+            }
+        }
+    }
+    LATEST_PROTOCOL_VERSION
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineRead {
+    Eof,
+    Line,
+    TooLong,
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> io::Result<LineRead> {
+    buf.clear();
+    let mut read_any = false;
+    let mut too_long = false;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok(if too_long {
+                LineRead::TooLong
+            } else if read_any {
+                LineRead::Line
+            } else {
+                LineRead::Eof
+            });
+        }
+        read_any = true;
+        let newline_pos = available.iter().position(|&b| b == b'\n');
+        let take = newline_pos.map_or(available.len(), |idx| idx + 1);
+        if !too_long {
+            if buf.len().saturating_add(take) > max_bytes {
+                too_long = true;
+                buf.clear();
+            } else {
+                buf.extend_from_slice(&available[..take]);
+            }
+        }
+        reader.consume(take);
+        if newline_pos.is_some() {
+            return Ok(if too_long {
+                LineRead::TooLong
+            } else {
+                LineRead::Line
+            });
+        }
+    }
 }
 
 fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
@@ -39,15 +132,32 @@ fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     engine: &Arc<TelemetryEngine<P, D>>,
     html_loader: &HtmlLoader,
 ) -> Option<Value> {
-    if !msg.is_object() {
+    let Some(obj) = msg.as_object() else {
         return Some(invalid_request_err("Invalid Request"));
+    };
+
+    let raw_id = obj.get("id");
+    let id_valid = raw_id.is_none_or(is_valid_mcp_id);
+    let err_id = match raw_id {
+        Some(v) if is_valid_mcp_id(v) => v.clone(),
+        _ => Value::Null,
+    };
+
+    let valid_version = obj.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
+    let method_opt = obj
+        .get("method")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty());
+    let valid_params = obj.get("params").is_none_or(Value::is_object);
+
+    if !id_valid || !valid_version || method_opt.is_none() || !valid_params {
+        return Some(jsonrpc_err(err_id, -32600, "Invalid Request"));
     }
-    let id = msg.get("id").cloned();
-    let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
 
     // Notifications (no id) require no JSON-RPC response.
-    let id = id?;
+    let id = raw_id?.clone();
+    let method = method_opt.unwrap_or_default();
+    let params = obj.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let ok = |result: Value| {
         json!({
@@ -56,28 +166,29 @@ fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             "result": result
         })
     };
-    let err = |code: i64, message: String| {
-        json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": code, "message": message }
-        })
-    };
+    let err = |code: i64, message: String| jsonrpc_err(id.clone(), code, message);
 
     match method {
         "initialize" => {
-            let client_proto = params
-                .get("protocolVersion")
-                .and_then(|v| v.as_str())
-                .filter(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(s))
-                .unwrap_or(LATEST_PROTOCOL_VERSION);
+            if session.initialized {
+                return Some(err(
+                    -32600,
+                    "Invalid Request: session already initialized".to_string(),
+                ));
+            }
+            let client_proto =
+                negotiate_protocol_version(params.get("protocolVersion").and_then(Value::as_str));
             // SEP-1865 requires extensions["io.modelcontextprotocol/ui"].mimeTypes to be an array
             // explicitly including "text/html;profile=mcp-app".
-            session.apps_capable = params["capabilities"]["extensions"][UI_EXTENSION]
+            let apps_capable = params["capabilities"]["extensions"][UI_EXTENSION]
                 .as_object()
                 .and_then(|ui| ui.get("mimeTypes"))
                 .and_then(|types| types.as_array())
                 .is_some_and(|types| types.iter().any(|v| v.as_str() == Some(APP_MIME)));
+            session.protocol_version = client_proto;
+            session.apps_capable = apps_capable;
+            session.initialized = true;
+
             let mut capabilities = json!({"tools": {}, "resources": {}});
             if session.apps_capable {
                 capabilities["extensions"] = json!({UI_EXTENSION: {"mimeTypes": [APP_MIME]}});
@@ -109,10 +220,16 @@ fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     format!("Tool not available in this session: {name}"),
                 ));
             }
-            let args = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let args = match params.get("arguments") {
+                None => json!({}),
+                Some(v) if v.is_object() => v.clone(),
+                Some(_) => {
+                    return Some(err(
+                        -32602,
+                        "Invalid params: arguments must be a JSON object".to_string(),
+                    ));
+                }
+            };
             Some(ok(call_tool_json(name, &args, engine)))
         }
         other => Some(err(-32601, format!("Method not found: {other}"))),
@@ -128,6 +245,23 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
     if let Some(batch) = msg.as_array() {
         if batch.is_empty() {
             return Some(invalid_request_err("Invalid Request: empty batch"));
+        }
+        let contains_initialize = batch.iter().any(|item| {
+            item.as_object()
+                .and_then(|o| o.get("method"))
+                .and_then(Value::as_str)
+                == Some("initialize")
+        });
+        if contains_initialize {
+            return Some(invalid_request_err(
+                "Invalid Request: initialize cannot be sent in a JSON-RPC batch",
+            ));
+        }
+        if !session.supports_jsonrpc_batch() {
+            return Some(invalid_request_err(format!(
+                "Invalid Request: JSON-RPC batching is not supported in MCP {}",
+                session.protocol_version
+            )));
         }
         let responses: Vec<Value> = batch
             .iter()
@@ -233,23 +367,53 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
 
     let stdin = io::stdin();
     let stdout = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
-    let mut line = String::new();
+    let mut line_buf = Vec::new();
     let mut reader = stdin.lock();
     let mut io_res = Ok(());
     let mut session = McpSession::default();
 
+    let write_response = |resp: &Value| -> io::Result<()> {
+        let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
+        serde_json::to_writer(&mut *out, resp)
+            .map_err(io::Error::other)
+            .and_then(|_| out.write_all(b"\n"))
+            .and_then(|_| out.flush())
+    };
+
     loop {
-        line.clear();
-        let n = match reader.read_line(&mut line) {
-            Ok(n) => n,
+        match read_bounded_line(&mut reader, &mut line_buf, MAX_STDIN_LINE_BYTES) {
+            Ok(LineRead::Eof) => break,
+            Ok(LineRead::TooLong) => {
+                let err_resp = invalid_request_err(format!(
+                    "Invalid Request: JSON-RPC line exceeds {MAX_STDIN_LINE_BYTES} byte limit"
+                ));
+                if let Err(e) = write_response(&err_resp) {
+                    io_res = Err(e);
+                    break;
+                }
+                continue;
+            }
+            Ok(LineRead::Line) => {}
             Err(e) => {
                 io_res = Err(e);
                 break;
             }
-        };
-        if n == 0 {
-            break;
         }
+        let line = match std::str::from_utf8(&line_buf) {
+            Ok(s) => s,
+            Err(utf8_err) => {
+                let err_resp = jsonrpc_err(
+                    Value::Null,
+                    -32700,
+                    format!("Parse error: invalid UTF-8 ({utf8_err})"),
+                );
+                if let Err(e) = write_response(&err_resp) {
+                    io_res = Err(e);
+                    break;
+                }
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -257,27 +421,19 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
         let msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(parse_err) => {
-                let err_resp = json!({
-                    "jsonrpc": "2.0",
-                    "id": Value::Null,
-                    "error": { "code": -32700, "message": format!("Parse error: {parse_err}") }
-                });
-                let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = serde_json::to_writer(&mut *out, &err_resp);
-                let _ = out.write_all(b"\n");
-                let _ = out.flush();
+                let err_resp =
+                    jsonrpc_err(Value::Null, -32700, format!("Parse error: {parse_err}"));
+                if let Err(e) = write_response(&err_resp) {
+                    io_res = Err(e);
+                    break;
+                }
                 continue;
             }
         };
 
         if let Some(resp) = handle_rpc_value_with_session(&msg, &mut session, &engine, &html_loader)
         {
-            let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = serde_json::to_writer(&mut *out, &resp)
-                .map_err(io::Error::other)
-                .and_then(|_| out.write_all(b"\n"))
-                .and_then(|_| out.flush())
-            {
+            if let Err(e) = write_response(&resp) {
                 io_res = Err(e);
                 break;
             }
@@ -395,11 +551,9 @@ mod tests {
             TestFanSensor("fanless"),
         ));
         let html = HtmlLoader::new(None);
-        let mut plain = McpSession::default();
-        let mut app = McpSession::default();
         let initialize = |session: &mut McpSession, params| {
             handle_rpc_value_with_session(
-                &json!({"id": 1, "method": "initialize", "params": params}),
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params}),
                 session,
                 &engine,
                 &html,
@@ -408,7 +562,7 @@ mod tests {
         };
         let list_tools = |session: &mut McpSession| {
             handle_rpc_value_with_session(
-                &json!({"id": 2, "method": "tools/list"}),
+                &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
                 session,
                 &engine,
                 &html,
@@ -417,16 +571,44 @@ mod tests {
         };
 
         for version in SUPPORTED_PROTOCOL_VERSIONS {
-            let init = initialize(&mut plain, json!({"protocolVersion": version}));
+            let mut s = McpSession::default();
+            let init = initialize(&mut s, json!({"protocolVersion": version}));
             assert_eq!(init["result"]["protocolVersion"], *version);
+            // Duplicate initialize MUST be rejected with -32600 without changing capabilities.
+            let dup = handle_rpc_value_with_session(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 99,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"extensions": {UI_EXTENSION: {"mimeTypes": [APP_MIME]}}}
+                    }
+                }),
+                &mut s,
+                &engine,
+                &html,
+            )
+            .unwrap();
+            assert_eq!(dup["error"]["code"], -32600);
+            assert_eq!(dup["id"], 99);
+            assert_eq!(
+                list_tools(&mut s)["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
         }
         for params in [json!({"protocolVersion": "2099-01-01"}), json!({})] {
-            let init = initialize(&mut plain, params);
+            let mut s = McpSession::default();
+            let init = initialize(&mut s, params);
             assert_eq!(init["result"]["protocolVersion"], LATEST_PROTOCOL_VERSION);
             assert!(init["result"]["capabilities"].get("extensions").is_none());
         }
 
         // SEP-1865 requires mimeTypes array explicitly containing APP_MIME.
+        let mut app = McpSession::default();
         let init = initialize(
             &mut app,
             json!({
@@ -445,6 +627,8 @@ mod tests {
             5
         );
 
+        let mut plain = McpSession::default();
+        let _ = initialize(&mut plain, json!({"protocolVersion": "2025-11-25"}));
         let tools = list_tools(&mut plain);
         let names: Vec<_> = tools["result"]["tools"]
             .as_array()
@@ -463,7 +647,7 @@ mod tests {
         // Plain session MUST reject app-only tools in tools/call!
         for forbidden in ["clamshell_refresh", "clamshell_configure"] {
             let err_resp = handle_rpc_value_with_session(
-                &json!({"id": 99, "method": "tools/call", "params": {"name": forbidden, "arguments": {}}}),
+                &json!({"jsonrpc": "2.0", "id": 99, "method": "tools/call", "params": {"name": forbidden, "arguments": {}}}),
                 &mut plain,
                 &engine,
                 &html,
@@ -480,23 +664,24 @@ mod tests {
             json!({"mimeTypes": null}),
             json!(null),
         ] {
+            let mut s = McpSession::default();
             let init = initialize(
-                &mut app,
+                &mut s,
                 json!({
                     "capabilities": {"extensions": {UI_EXTENSION: capability}}
                 }),
             );
             assert!(init["result"]["capabilities"].get("extensions").is_none());
             assert_eq!(
-                list_tools(&mut app)["result"]["tools"]
+                list_tools(&mut s)["result"]["tools"]
                     .as_array()
                     .unwrap()
                     .len(),
                 3
             );
             let err_resp = handle_rpc_value_with_session(
-                &json!({"id": 100, "method": "tools/call", "params": {"name": "clamshell_configure", "arguments": {"guardEnabled": false}}}),
-                &mut app,
+                &json!({"jsonrpc": "2.0", "id": 100, "method": "tools/call", "params": {"name": "clamshell_configure", "arguments": {"guardEnabled": false}}}),
+                &mut s,
                 &engine,
                 &html,
             )
@@ -504,14 +689,60 @@ mod tests {
             assert_eq!(err_resp["error"]["code"], -32602);
         }
 
-        // JSON-RPC 2.0 batch handling (required for 2025-03-26)
+        // Strict JSON-RPC 2.0 validation: version, method, id, and params types
+        for bad_req in [
+            json!({"id": 1, "method": "ping"}),
+            json!({"jsonrpc": "1.0", "id": 1, "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": 1}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": 123}),
+            json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": true, "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": [1], "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": {"k": 1}, "method": "ping"}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": 42}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ping", "params": [1]}),
+        ] {
+            let resp = handle_rpc_value_with_session(&bad_req, &mut plain, &engine, &html).unwrap();
+            assert_eq!(resp["error"]["code"], -32600, "bad_req={bad_req}");
+            assert!(
+                resp["id"].is_null() || resp["id"].is_i64() || resp["id"].is_string(),
+                "invalid id must never be echoed: {resp}"
+            );
+        }
+
+        // JSON-RPC batch arrays MUST be rejected on 2025-06-18+ (and 2025-11-25)
+        for ver in ["2025-06-18", "2025-11-25"] {
+            let mut modern = McpSession::default();
+            let _ = initialize(&mut modern, json!({"protocolVersion": ver}));
+            let rejected = handle_rpc_value_with_session(
+                &json!([{"jsonrpc": "2.0", "id": 10, "method": "ping"}]),
+                &mut modern,
+                &engine,
+                &html,
+            )
+            .unwrap();
+            assert_eq!(rejected["error"]["code"], -32600);
+        }
+
+        // JSON-RPC 2.0 batch handling on 2025-03-26 (and batched initialize MUST be rejected)
+        let mut legacy = McpSession::default();
+        let _ = initialize(&mut legacy, json!({"protocolVersion": "2025-03-26"}));
+        let batched_init = handle_rpc_value_with_session(
+            &json!([{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}]),
+            &mut legacy,
+            &engine,
+            &html,
+        )
+        .unwrap();
+        assert_eq!(batched_init["error"]["code"], -32600);
+
         let batch_resp = handle_rpc_value_with_session(
             &json!([
                 {"jsonrpc": "2.0", "id": 10, "method": "ping"},
                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
                 {"jsonrpc": "2.0", "id": 11, "method": "ping"}
             ]),
-            &mut plain,
+            &mut legacy,
             &engine,
             &html,
         )
@@ -526,14 +757,31 @@ mod tests {
         // Notification-only batch emits no response; empty batch emits -32600
         assert!(handle_rpc_value_with_session(
             &json!([{"jsonrpc": "2.0", "method": "notifications/initialized"}]),
-            &mut plain,
+            &mut legacy,
             &engine,
             &html,
         )
         .is_none());
         let empty_batch =
-            handle_rpc_value_with_session(&json!([]), &mut plain, &engine, &html).unwrap();
+            handle_rpc_value_with_session(&json!([]), &mut legacy, &engine, &html).unwrap();
         assert_eq!(empty_batch["error"]["code"], -32600);
+
+        // Bounded line reader rejects >max_bytes cleanly and recovers on subsequent line
+        let mut cursor = io::Cursor::new(b"1234567890\nok\n".to_vec());
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut cursor, &mut buf, 8).unwrap(),
+            LineRead::TooLong
+        );
+        assert_eq!(
+            read_bounded_line(&mut cursor, &mut buf, 8).unwrap(),
+            LineRead::Line
+        );
+        assert_eq!(buf, b"ok\n");
+        assert_eq!(
+            read_bounded_line(&mut cursor, &mut buf, 8).unwrap(),
+            LineRead::Eof
+        );
     }
 
     #[test]
@@ -700,8 +948,9 @@ mod tests {
             br["result"]["structuredContent"]["brightnessAction"]["savedPercent"],
             45
         );
+        assert_eq!(br["result"]["structuredContent"]["stale"], false);
 
-        // Configure policy + guardEnabled toggle updates profile, guardStatus, and hash
+        // Configure policy + guardEnabled toggle updates profile, guardStatus, hash, and includes stale
         let cfg = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"clamshell_configure","arguments":{"modeOverride":"utility","maxJobsOverride":2,"guardEnabled":false}}}),
             &mut session,
@@ -714,10 +963,50 @@ mod tests {
             "utility"
         );
         assert_eq!(cfg["result"]["structuredContent"]["guardStatus"], "paused");
+        assert_eq!(cfg["result"]["structuredContent"]["stale"], false);
         assert_ne!(
             cfg["result"]["structuredContent"]["hash"].as_str().unwrap(),
             hash
         );
+
+        // P2-1: invalid configure fields/values and invalid refresh ifHash return isError: true;
+        // full refresh response includes stale.
+        for bad_cfg in [
+            json!({"modeOverride": "bogus"}),
+            json!({"maxJobsOverride": 999}),
+            json!({"unknownField": true}),
+        ] {
+            let err = handle_rpc_value_with_session(
+                &json!({"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"clamshell_configure","arguments":bad_cfg}}),
+                &mut session,
+                &engine,
+                &html_loader,
+            )
+            .unwrap();
+            assert_eq!(err["result"]["isError"], true, "bad_cfg={bad_cfg}");
+        }
+        for bad_refresh in [
+            json!({"ifHash": "x".repeat(65)}),
+            json!({"ifHash": 123}),
+            json!({"if_hash": hash}),
+        ] {
+            let err = handle_rpc_value_with_session(
+                &json!({"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":bad_refresh}}),
+                &mut session,
+                &engine,
+                &html_loader,
+            )
+            .unwrap();
+            assert_eq!(err["result"]["isError"], true, "bad_refresh={bad_refresh}");
+        }
+        let full_refresh = handle_rpc_value_with_session(
+            &json!({"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":"different-hash","force":true}}}),
+            &mut session,
+            &engine,
+            &html_loader,
+        )
+        .unwrap();
+        assert_eq!(full_refresh["result"]["structuredContent"]["stale"], false);
 
         // Desktop Mac (open/unknown lid + no built-in display) returns explicit isError: true
         // and honors persisted settings.lang via engine.detect_lang() across all tool error paths.

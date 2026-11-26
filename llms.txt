@@ -32,11 +32,16 @@ Generic stdio MCP configuration (`mcpServers`):
 }
 ```
 
-## Public MCP Tools
+## MCP Tools
 
-- `clamshell_panel`: Opens the live dashboard and reports lid, power, thermal, display guard, and active throttle tier.
-- `clamshell_set_brightness`: Sets built-in display brightness (`0`–`100%`) immediately when open, or updates wake-restore level while closed without lighting the screen.
-- `clamshell_lock_screen`: Locks the screen immediately without sleeping background jobs (call only when explicitly requested).
+Public tools (all MCP sessions):
+- `clamshell_panel` (`{ fresh?: boolean }`): Opens the live dashboard and reports lid, power, thermal, fan, display guard, and active throttle tier.
+- `clamshell_set_brightness` (`{ percent: 0..100 }`): Sets built-in display brightness (`0`–`100%`) immediately when open, or updates wake-restore level while closed without lighting the screen.
+- `clamshell_lock_screen` (`{}`): Locks the screen immediately without sleeping background jobs (call only when explicitly requested).
+
+App-only tools (available only after SEP-1865 UI negotiation):
+- `clamshell_refresh` (`{ ifHash?: string, force?: boolean, fresh?: boolean }`): ETag-deduplicated telemetry polling.
+- `clamshell_configure` (`{ modeOverride?, maxJobsOverride?, acClosedProfile?, guardEnabled?, thermalBrightCapPct?, lang? }`): Persist policy, display guard, thermal cap, and language settings.
 
 ## CLI Subcommands
 
@@ -45,4 +50,5 @@ Generic stdio MCP configuration (`mcpServers`):
 - `mac-clamshell-mcp run --sh "<shell command>"`
 - `mac-clamshell-mcp brightness get | set <0..100>`
 - `mac-clamshell-mcp lock`
-- `mac-clamshell-mcp guard install | uninstall | status | watch`
+- `mac-clamshell-mcp guard install | uninstall | status`
+- `mac-clamshell-mcp watch [--daemon] [--interval <secs>]`

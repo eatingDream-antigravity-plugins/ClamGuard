@@ -3,6 +3,7 @@ use crate::mcp::telemetry::{summarize_for_model, TelemetryEngine};
 use crate::platform::display_ffi::{clamp_percent, DisplayBackend};
 use crate::platform::macos::ProbeBackend;
 use crate::state::SettingsPatch;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -186,6 +187,7 @@ pub fn read_resource_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static
         obj.insert("serverMs".into(), json!(collected.server_ms));
         obj.insert("fromCache".into(), json!(collected.from_cache));
         obj.insert("stale".into(), json!(collected.stale));
+        obj.insert("serverVersion".into(), json!(SERVER_VERSION));
     }
     let boot_script = format!(
         "window.__MAC_CLAMSHELL_BOOT__={};",
@@ -354,6 +356,17 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
     result
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RefreshArgs {
+    #[serde(default)]
+    if_hash: Option<String>,
+    #[serde(default)]
+    force: Option<bool>,
+    #[serde(default)]
+    fresh: Option<bool>,
+}
+
 pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     name: &str,
     args: &Value,
@@ -376,13 +389,25 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             })
         }
         "clamshell_refresh" => {
-            let if_hash = args
-                .get("ifHash")
-                .or_else(|| args.get("if_hash"))
-                .and_then(|v| v.as_str());
-            let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false)
-                || args.get("fresh").and_then(|v| v.as_bool()).unwrap_or(false);
-            let (unchanged, sc, snap) = engine.refresh_json(if_hash, force);
+            let parsed: RefreshArgs = match serde_json::from_value(args.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Invalid refresh arguments: {e}") }]
+                    });
+                }
+            };
+            if let Some(ref h) = parsed.if_hash {
+                if h.chars().count() > 64 {
+                    return json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": "Invalid refresh arguments: ifHash must be a string with maxLength 64" }]
+                    });
+                }
+            }
+            let force = parsed.force.unwrap_or(false) || parsed.fresh.unwrap_or(false);
+            let (unchanged, sc, snap) = engine.refresh_json(parsed.if_hash.as_deref(), force);
             let text = if unchanged {
                 "unchanged".to_string()
             } else {
@@ -412,6 +437,7 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                         obj.insert("unchanged".into(), json!(false));
                         obj.insert("serverMs".into(), json!(collected.server_ms));
                         obj.insert("fromCache".into(), json!(collected.from_cache));
+                        obj.insert("stale".into(), json!(collected.stale));
                     }
                     json!({
                         "content": [{ "type": "text", "text": summarize_for_model(&collected.snapshot) }],
@@ -431,6 +457,14 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             }
         }
         "clamshell_set_brightness" => {
+            if let Some(obj) = args.as_object() {
+                if let Some(unknown) = obj.keys().find(|k| k.as_str() != "percent") {
+                    return json!({
+                        "isError": true,
+                        "content": [{ "type": "text", "text": format!("Invalid brightness arguments: unknown field `{unknown}`") }]
+                    });
+                }
+            }
             let Some(raw_pct) = args.get("percent").and_then(|v| v.as_f64()) else {
                 let msg = match engine.detect_lang() {
                     Lang::ZhCn => "亮度调节失败: percent 必须是 0 到 100 之间的数字".to_string(),
@@ -471,6 +505,7 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                         obj.insert("unchanged".into(), json!(false));
                         obj.insert("serverMs".into(), json!(collected.server_ms));
                         obj.insert("fromCache".into(), json!(collected.from_cache));
+                        obj.insert("stale".into(), json!(collected.stale));
                         obj.insert(
                             "brightnessAction".into(),
                             serde_json::to_value(&action).unwrap_or_else(|_| json!({})),
