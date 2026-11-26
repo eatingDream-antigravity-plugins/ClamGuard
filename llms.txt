@@ -1,6 +1,6 @@
 # Mac Clamshell MCP
 
-> Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, and display thermal guard that turns off the built-in screen when closed, throttles heavy builds/tests based on lid/power/thermal state, adjusts brightness, and locks the screen without sleeping background jobs.
+> Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, read-only SMC fan telemetry with third-party fan-manager coexistence, and display thermal guard that turns off the built-in screen when closed, throttles heavy builds/tests based on lid/power/thermal state, adjusts brightness, and locks the screen without sleeping background jobs.
 
 ## For AI Agents
 

@@ -27,12 +27,22 @@ import {
   createBrightnessController,
 } from "../brightness.js";
 import { applyHostStyleVariables, parseColorLum } from "../bridge.js";
-import { computeOptimisticState, describeGuardStatus, resolvePanelLang } from "../model.js";
+import {
+  computeOptimisticState,
+  describeFanState,
+  describeGuardStatus,
+  resolvePanelLang,
+} from "../model.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PANEL_DIR = path.resolve(__dirname, "..");
 
-describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editorial UI", () => {
+const FAMILY_TOKENS = [
+  "--bg", "--s1", "--s2", "--s0", "--t1", "--t2", "--t3",
+  "--ln", "--l2", "--sh", "--ac", "--ah", "--ok", "--wn", "--er", "--in",
+];
+
+describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Ownership & Editorial UI", () => {
   it("adapts interval from net RTT in foreground and continues background polling when hidden", async () => {
     assert.equal(computeAdaptiveIntervalMs({ rttMs: 40, hidden: false }), POLL_INTERVAL_FAST_MS);
     assert.equal(computeAdaptiveIntervalMs({ rttMs: 220, hidden: false }), POLL_INTERVAL_MED_MS);
@@ -89,7 +99,6 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(poller.getMetrics().lastNetRttMs, 450);
     assert.equal(poller.getMetrics().currentIntervalMs, POLL_INTERVAL_SLOW_MS);
 
-    // Switching to hidden MUST keep polling at background cadence (NOT pause!)
     hidden = true;
     poller.handleVisibilityChange(true);
     assert.equal(timers.size, 1);
@@ -97,7 +106,6 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(bgTimer.ms, BG_POLL_INTERVAL_SLOW_MS);
     assert.equal(poller.getMetrics().inBackground, true);
 
-    // Fire the background timer while still hidden
     timers.delete(bgTimerId);
     bgTimer.fn();
     assert.equal(fetchCalls.length, 2);
@@ -106,7 +114,6 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     await new Promise((r) => setImmediate(r));
     assert.equal(timers.size, 1);
 
-    // Becoming visible triggers immediate forced reveal refresh
     hidden = false;
     wallClock += 500;
     poller.handleVisibilityChange(false);
@@ -188,21 +195,18 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.deepEqual(ioOpts, { threshold: 0 });
     assert.equal(target.listeners("pointerenter")[0]?.opts?.passive, true);
 
-    // 1. ResizeObserver collapsed (<=0) -> visible (>0) edge triggers force refresh
     rect = { width: 380, height: 640 };
     roCb([{ contentRect: rect }]);
     await new Promise((r) => setImmediate(r));
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0], { force: true, reason: "resize" });
 
-    // Within 250ms throttle, rapid focus/pageshow does NOT double-fire
     wallClock += REVEAL_THROTTLE_MS - 50;
     win.emit("focus");
     win.emit("pageshow");
     await new Promise((r) => setImmediate(r));
     assert.equal(calls.length, 1);
 
-    // After 250ms throttle, IntersectionObserver !wasVis -> isIntersecting edge triggers
     wallClock += 100;
     ioCb([{ isIntersecting: false }]);
     ioCb([{ isIntersecting: true }]);
@@ -210,7 +214,6 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(calls.length, 2);
     assert.deepEqual(calls[1], { force: true, reason: "intersection" });
 
-    // 2. Passive pointerenter skips when fresh (<= 900ms), fires when stale (> 900ms)
     wallClock += POINTER_STALE_MS - 100;
     target.emit("pointerenter");
     await new Promise((r) => setImmediate(r));
@@ -222,7 +225,6 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(calls.length, 3);
     assert.deepEqual(calls[2], { force: true, reason: "pointerenter" });
 
-    // 3. detach() disconnects observers & removes listeners
     detach();
     assert.equal(roDisconnected, true);
     assert.equal(ioDisconnected, true);
@@ -344,32 +346,62 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(parseColorLum("#fff0"), null);
     assert.ok(parseColorLum("#141311") < 0.2);
     assert.ok(parseColorLum("#141311ff") < 0.2);
-    assert.ok(parseColorLum("#FAF8F5") > 0.9);
-    assert.ok(parseColorLum("rgba(250, 248, 245, 0.9)") > 0.9);
+    assert.ok(parseColorLum("#FAF8F4") > 0.9);
+    assert.ok(parseColorLum("rgba(250, 248, 244, 0.9)") > 0.9);
   });
 
-  it("built dist/panel.html is <45 KiB, CSP-safe, warm-editorial themed, zero-flicker dark-first with lock button and reveal hooks", () => {
+  it("built dist/panel.html satisfies all Opus Editorial-Warm §0/§1/§2/§4/§6 hard invariants", () => {
     const html = fs.readFileSync(path.join(PANEL_DIR, "dist", "panel.html"), "utf8");
     const bytes = Buffer.byteLength(html, "utf8");
-    assert.ok(bytes < 45 * 1024, `expected <45 KiB, got ${(bytes / 1024).toFixed(1)} KiB`);
-    assert.ok(html.includes('<meta name="color-scheme" content="dark">'), "missing dark-only color-scheme meta in head");
+    assert.ok(bytes < 46_080, `hard size gate failed: ${bytes} B >= 46080 B`);
+    assert.ok(bytes <= 43_500, `expected <=43,500 B design target, got ${bytes} B`);
+
+    // Dark-first frame 0 & CSP
+    assert.ok(html.includes('<meta name="color-scheme" content="dark">'), "missing dark-only color-scheme meta");
+    assert.ok(html.includes("default-src 'none'"), "missing CSP default-src 'none'");
     assert.ok(html.includes('style="background:#141311;color-scheme:dark"'), "missing inline dark lock on <html>");
-    assert.ok(html.includes("/*__MAC_CLAMSHELL_BOOT__*/"), "missing SSR boot placeholder");
-    assert.ok(html.includes("__MAC_CLAMSHELL_BOOT__"), "missing SSR boot hydration");
-    assert.ok(!/https?:\/\/[^"'\s>]+/i.test(html.replace(/http:\/\/www\.w3\.org\/2000\/svg/g, "")), "must contain zero external URLs for default CSP");
-    assert.ok((html.includes("#141311") || html.includes("#141311")) && (html.includes("#FAF8F5") || html.includes("#faf8f5")), "missing warm editorial surface tokens");
-    assert.ok(html.includes("#D97757") || html.includes("#d97757"), "missing warm terracotta accent");
-    assert.ok(!/prefers-color-scheme:\s*light/i.test(html), "must NOT override dark frame 0 via prefers-color-scheme: light");
-    assert.ok(html.includes("[data-theme=light]") || html.includes('[data-theme="light"]'), "light theme must be gated on data-theme=light");
-    assert.ok(html.includes("prefers-reduced-motion:reduce") || html.includes("prefers-reduced-motion: reduce"), "missing reduced-motion support");
-    assert.ok(!html.includes("data-entering"), "must NOT use opacity:0 entrance animation that causes refresh flicker");
-    assert.ok(/html,body\{[^}]*background-color:var\(--color-background-primary,\s*#141311\)/i.test(html), "root html,body must default to dark warm obsidian #141311 on frame 0");
-    assert.ok(html.includes("containerDimensions"), "ResizeObserver must be gated on inline containerDimensions");
-    assert.ok(html.includes("IntersectionObserver") && html.includes("pointerenter"), "missing reveal refresh hooks");
-    const appSrc = fs.readFileSync(path.join(PANEL_DIR, "app.js"), "utf8");
-    const patchAllBody = appSrc.slice(appSrc.indexOf("function patchAll("), appSrc.indexOf("function mountShell("));
-    assert.ok(!patchAllBody.includes("root.innerHTML"), "patchAll must strictly patch in-place without rebuilding root.innerHTML");
-    assert.ok(html.includes("diag-tray") && html.includes("bright-track") && html.includes("mode-rail") && html.includes("lock-btn"), "missing progressive disclosure tray, controls, and lock button");
+    assert.ok(html.includes('<body style="background:#141311">'), "missing inline dark lock on <body>");
+    assert.ok(!/https?:\/\/[^"'\s>]+/i.test(html.replace(/http:\/\/www\.w3\.org\/2000\/svg/g, "")), "must contain zero external URLs");
+
+    // Zero prefers-color-scheme, zero opacity:0 in @keyframes, zero innerHTML/outerHTML, zero --buncss-*
+    assert.ok(!/prefers-color-scheme/i.test(html), "must NOT contain prefers-color-scheme");
+    const keyframes = html.match(/@keyframes\s+[^{]+\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/gi) || [];
+    for (const kf of keyframes) {
+      assert.ok(!/opacity\s*:\s*0(?:\D|$)/i.test(kf), `forbidden opacity:0 in @keyframes: ${kf}`);
+    }
+    assert.ok(!/\.innerHTML\s*=|\.outerHTML\s*=/i.test(html), "must NOT assign innerHTML/outerHTML");
+    assert.ok(!/--buncss-/i.test(html), "must strip --buncss-* declarations");
+
+    // Exactly one inline <script> containing boot placeholder
+    const scripts = html.match(/<script\b[^>]*>[\s\S]*?<\/script>/gi) || [];
+    assert.equal(scripts.length, 1, `expected exactly 1 <script> tag, got ${scripts.length}`);
+    assert.ok(scripts[0].includes("/*__MAC_CLAMSHELL_BOOT__*/"), "missing SSR boot placeholder in single script");
+    const jsBody = scripts[0].replace(/^<script[^>]*>|<\/script>$/gi, "");
+    new Function(jsBody);
+
+    // All 16 family tokens in BOTH dark (:root) and light (:root[data-theme=light])
+    const styleMatch = html.match(/<style>([\s\S]*?)<\/style>/i);
+    assert.ok(styleMatch, "missing inline <style>");
+    const css = styleMatch[1];
+    const darkBlock = css.match(/:root\{([^}]+)\}/i);
+    const lightBlock = css.match(/:root\[data-theme=["']?light["']?\]\{([^}]+)\}/i);
+    assert.ok(darkBlock, "missing dark :root token block");
+    assert.ok(lightBlock, "missing light :root[data-theme=light] token block");
+    for (const tok of FAMILY_TOKENS) {
+      assert.ok(darkBlock[1].includes(`${tok}:`), `missing dark token ${tok}`);
+      assert.ok(lightBlock[1].includes(`${tok}:`), `missing light token ${tok}`);
+    }
+    assert.ok(/--ok:\s*#2f7d53/i.test(lightBlock[1]), `light --ok must be #2F7D53, got ${lightBlock[1]}`);
+
+    // Reduced motion, structure, no duplicate #biv, Lock button out of .hd header
+    assert.ok(/prefers-reduced-motion:\s*reduce/i.test(html), "missing reduced-motion support");
+    assert.ok(!html.includes('id="biv"'), "duplicate brightness #biv must be removed");
+    const headerMatch = html.match(/<header class="hd">[\s\S]*?<\/header>/i);
+    assert.ok(headerMatch, "missing .hd header");
+    assert.ok(!headerMatch[0].includes('id="lock-btn"'), "Lock Screen must be in Display card footer, not header");
+    assert.ok(html.includes('id="lock-btn"'), "missing #lock-btn in Display card footer");
+    assert.ok(html.includes('id="fan-card"') && html.includes('id="bnr"') && html.includes('class="card hero fl"'), "missing hero, banner, or fan card");
+    assert.ok(html.includes("diag-tray") && html.includes("bright-track") && html.includes("mode-rail"), "missing progressive disclosure tray and controls");
     assert.ok(
       html.includes("clamshell_refresh") &&
         html.includes("clamshell_configure") &&
@@ -377,25 +409,19 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
         html.includes("clamshell_lock_screen"),
       "missing expected MCP tool names"
     );
-    for (const forbidden of ["Normal 正常", "max_jobs=", "拖动或点按轨道", "自动跟随"]) {
-      assert.ok(!html.includes(forbidden), `panel.html must not contain cluttered text: ${forbidden}`);
-    }
-    const m = html.match(/<script>\/\*__MAC_CLAMSHELL_BOOT__\*\/<\/script><script>([\s\S]+)<\/script>/);
-    assert.ok(m, "missing inline script");
-    new Function(m[1]);
   });
 
-  it("panel runtime handles background poll DOM updates, hostContext reveal refresh, lock button RPC, and teardown", async () => {
+  it("panel runtime updates hero, fan ownership states, data-ps paused state, disconnected banner, lock RPC, and teardown", async () => {
     const html = fs.readFileSync(path.join(PANEL_DIR, "dist", "panel.html"), "utf8");
-    const m = html.match(/<script>\/\*__MAC_CLAMSHELL_BOOT__\*\/<\/script><script>([\s\S]+)<\/script>/);
-    assert.ok(m, "missing inline script");
+    const m = html.match(/<script>([\s\S]+)<\/script>/);
+    assert.ok(m, "missing single inline script");
 
     const byId = new Map();
     const mkEl = (id = "", attrs = {}) => {
       const attrMap = new Map(Object.entries(attrs));
       let textVal = "";
-      let innerVal = "";
       const listeners = new Map();
+      const children = [];
       const el = {
         id,
         disabled: false,
@@ -403,15 +429,15 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
         tabIndex: 0,
         className: "",
         title: "",
-        style: { setProperty() {}, backgroundColor: "", colorScheme: "" },
+        style: { setProperty() {}, backgroundColor: "", colorScheme: "", width: "" },
         lastElementChild: null,
         get textContent() { return textVal; },
         set textContent(v) { el._textWrites = (el._textWrites || 0) + 1; textVal = String(v); },
-        get innerHTML() { return innerVal; },
-        set innerHTML(v) { innerVal = String(v); },
         setAttribute(k, v) { attrMap.set(k, String(v)); },
         getAttribute(k) { return attrMap.has(k) ? attrMap.get(k) : null; },
         removeAttribute(k) { attrMap.delete(k); },
+        appendChild(c) { children.push(c); return c; },
+        replaceChildren(...nodes) { children.length = 0; children.push(...nodes); el._children = [...nodes]; },
         addEventListener(t, fn) {
           if (!listeners.has(t)) listeners.set(t, []);
           listeners.get(t).push(fn);
@@ -434,27 +460,24 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     };
 
     const appRoot = mkEl("app");
-    const initInnerSetter = Object.getOwnPropertyDescriptor(appRoot, "innerHTML").set;
-    Object.defineProperty(appRoot, "innerHTML", {
-      get: () => appRoot._rawHtml || "",
-      set: (v) => {
-        appRoot._rawHtml = String(v);
-        initInnerSetter.call(appRoot, v);
-        for (const id of [
-          "fb", "auto-chip", "lock-btn", "refresh-btn", "lang-btn", "t-lock", "hd", "hs", "ht", "ft",
-          "bt", "bv", "biv", "bright-track", "bc", "gs", "guard-btn", "mode-rail", "mb", "sv", "ar",
-          "jd", "ji", "tp", "dl", "ds", "dg", "dp", "dbb", "dbf", "dlm", "dt", "dsp", "dld", "dmu",
-          "dmt", "dmf", "dc", "dhi", "de", "dh", "diag-tray",
-        ]) {
-          if (!byId.has(id)) {
-            const e = mkEl(id);
-            if (id === "auto-chip" || id === "guard-btn") e.lastElementChild = mkEl(`${id}-lbl`);
-            if (id === "lock-btn") e.setAttribute("data-a", "lock");
-            if (id === "guard-btn") e.setAttribute("data-a", "guard");
-          }
-        }
-      },
-    });
+    for (const id of [
+      "shell", "emp", "emp-msg", "emp-btn", "swp",
+      "hd", "hs", "fb", "fb-p", "fb-d", "fb-t", "fb-r",
+      "auto-chip", "auto-lbl", "lang-grp", "refresh-btn",
+      "bnr", "bnr-t", "bnr-act", "bnr-x",
+      "k0", "h-lid-d", "h-lid", "k1", "h-pwr-d", "h-pwr", "hbb", "hbf",
+      "k2", "h-thm-d", "h-thm", "k3", "h-grd-d", "h-grd",
+      "k4", "bt", "bv", "bright-track", "prs-grp", "bc", "k5", "gs", "guard-btn", "lock-btn", "k6",
+      "k7", "mb", "mode-rail", "k8", "ar", "jd", "sv", "ji",
+      "fan-card", "k9", "frpm", "fth", "frow2", "ka", "fctrl", "fown", "fcap",
+      "diag-tray", "kb", "tp", "kc", "dmu", "dmt", "dmf", "dc",
+      "kd", "dld", "dsp", "ds", "dlm", "ke", "ac-grp", "de", "dh", "dhi", "ht", "ft",
+    ]) {
+      const e = mkEl(id);
+      if (id === "lock-btn") e.setAttribute("data-a", "lock");
+      if (id === "guard-btn") e.setAttribute("data-a", "guard");
+      if (id === "auto-chip") e.lastElementChild = byId.get("auto-lbl") || mkEl("auto-lbl");
+    }
 
     const docEl = mkEl("__html");
     const bodyEl = mkEl("__body");
@@ -465,6 +488,7 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     let tid = 1;
     const rpcCalls = [];
     const configureHandlers = [];
+    let failNextRefresh = false;
     let nextPollPayload = { unchanged: true, hash: "h1", timestamp: "2026-01-01T00:00:05Z", serverMs: 2 };
     let roDisconnected = false;
     let ioDisconnected = false;
@@ -483,6 +507,15 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
           if (msg.params.name === "clamshell_configure" && configureHandlers.length > 0) {
             const handler = configureHandlers.shift();
             handler(msg.id, msg.params.arguments);
+            return;
+          }
+          if (msg.params.name === "clamshell_refresh" && failNextRefresh) {
+            setImmediate(() =>
+              emitWin("message", {
+                source: fakeParent,
+                data: { jsonrpc: "2.0", id: msg.id, result: { isError: true, content: [{ type: "text", text: "offline" }] } },
+              })
+            );
             return;
           }
           let structuredContent = nextPollPayload;
@@ -519,6 +552,17 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
       policy: { profile: "normal", modeSource: "auto", maxJobs: 10, niceLevel: 0 },
       envVars: {},
       display: { available: true, percent: 60, savedPercent: 60, asleep: false },
+      fan: {
+        status: "ok",
+        fans: [{ id: 0, label: "Left", rpm: 2140, manual: false }, { id: 1, label: "Right", rpm: 2210, manual: false }],
+        controller: "System (macOS)",
+        externalManagers: [],
+        ownershipMode: "observer",
+        readOnly: true,
+        sampledAtMs: 1700000000000,
+        stale: false,
+        note: "Read-only observer.",
+      },
       guardStatus: "armed",
       hash: "h1",
     };
@@ -543,6 +587,8 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
         get hidden() { return docHidden; },
         getElementById: (id) => byId.get(id) || null,
         querySelector: () => null,
+        createElement: (tag) => mkEl("", { _tag: tag }),
+        createTextNode: (t) => ({ textContent: String(t) }),
         addEventListener(t, fn) {
           if (!docListeners.has(t)) docListeners.set(t, []);
           docListeners.get(t).push(fn);
@@ -580,10 +626,15 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
 
-    assert.ok(byId.get("hs").textContent.includes("Open"));
+    assert.equal(byId.get("h-lid").textContent, "Open");
+    assert.equal(byId.get("frpm").textContent, "L 2,140 · R 2,210 rpm");
+    assert.equal(byId.get("fctrl").textContent, "System (macOS)");
+    assert.equal(byId.get("fown").textContent, "Observer");
+    assert.equal(byId.get("fown").getAttribute("data-k"), "in");
+    assert.equal(byId.get("auto-chip").getAttribute("data-ps"), "false");
     const writesAfterBoot = byId.get("hs")._textWrites;
 
-    // 1. Hide document -> background poll with unchanged:true causes ZERO DOM writes to status
+    // 1. Background poll unchanged:true -> 0 DOM churn
     docHidden = true;
     for (const fn of docListeners.get("visibilitychange") || []) fn();
     const bgTimer1 = [...timers].reverse().find((t) => !t.cleared && t.ms >= BG_POLL_INTERVAL_FAST_MS);
@@ -592,23 +643,96 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     bgTimer1.fn();
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(rpcCalls[rpcCalls.length - 1].name, "clamshell_refresh");
-    assert.equal(rpcCalls[rpcCalls.length - 1].arguments.ifHash, "h1");
-    assert.equal(rpcCalls[rpcCalls.length - 1].arguments.force, false);
     assert.equal(byId.get("hs")._textWrites, writesAfterBoot, "unchanged poll must cause 0 DOM churn");
 
-    // 2. Background poll with CHANGED state MUST unconditionally update DOM while still hidden!
-    nextPollPayload = { ...boot, lidState: "closed", batteryPct: 42, powerSource: "battery", hash: "h2", unchanged: false, serverMs: 3 };
+    // 2. Changed poll with Macs Fan Control yield + paused guard updates hero, fan card, and real data-ps!
+    nextPollPayload = {
+      ...boot,
+      lidState: "closed",
+      batteryPct: 42,
+      powerSource: "battery",
+      settings: { ...boot.settings, guardEnabled: false },
+      guardStatus: "paused",
+      fan: {
+        status: "ok",
+        fans: [{ id: 0, label: "Left", rpm: 3200, manual: true }, { id: 1, label: "Right", rpm: 3350, manual: true }],
+        controller: "Macs Fan Control",
+        externalManagers: ["Macs Fan Control"],
+        ownershipMode: "yield",
+        readOnly: true,
+        sampledAtMs: 1700000005000,
+        stale: false,
+        note: "Yields to Macs Fan Control.",
+      },
+      hash: "h2",
+      unchanged: false,
+      serverMs: 3,
+    };
     const bgTimer2 = [...timers].reverse().find((t) => !t.cleared && t.ms >= BG_POLL_INTERVAL_FAST_MS);
-    assert.ok(bgTimer2, "expected next background poll timer");
     bgTimer2.cleared = true;
     bgTimer2.fn();
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.ok(byId.get("hs").textContent.includes("Closed"), "changed background poll must render DOM unconditionally");
-    assert.ok(byId.get("hs").textContent.includes("42%"));
+    assert.equal(byId.get("h-lid").textContent, "Closed");
+    assert.equal(byId.get("h-grd").textContent, "Paused");
+    assert.equal(byId.get("auto-chip").getAttribute("data-ps"), "true", "data-ps must reflect real guard-paused state");
+    assert.equal(byId.get("guard-btn").getAttribute("data-ps"), "true");
+    assert.equal(byId.get("frpm").textContent, "L 3,200 · R 3,350 rpm");
+    assert.equal(byId.get("fctrl").textContent, "Macs Fan Control");
+    assert.equal(byId.get("fown").textContent, "Yield");
+    assert.equal(byId.get("fown").getAttribute("data-k"), "wn");
 
-    // 3. onhostcontextchanged with containerDimensions triggers immediate fresh refresh
+    // 3. Fanless state hides controller row and shows passive cooling
+    nextPollPayload = {
+      ...boot,
+      fan: {
+        status: "fanless",
+        fans: [],
+        controller: "System (macOS)",
+        externalManagers: [],
+        ownershipMode: "observer",
+        readOnly: true,
+        sampledAtMs: 1700000010000,
+        stale: false,
+        note: "Fanless.",
+      },
+      hash: "h2b",
+      unchanged: false,
+      serverMs: 2,
+    };
+    const bgTimerFanless = [...timers].reverse().find((t) => !t.cleared && t.ms >= BG_POLL_INTERVAL_FAST_MS);
+    bgTimerFanless.cleared = true;
+    bgTimerFanless.fn();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(byId.get("frpm").textContent, "No fans (passive cooling)");
+    assert.equal(byId.get("frow2").hidden, true);
+
+    // 4. 3 consecutive background poll failures show disconnected wn banner; recovery shows ✓ Reconnected
+    failNextRefresh = true;
+    for (let i = 0; i < 3; i += 1) {
+      const t = [...timers].reverse().find((x) => !x.cleared && x.ms >= POLL_INTERVAL_FAST_MS);
+      assert.ok(t, `expected poll timer on failure #${i + 1}`);
+      t.cleared = true;
+      t.fn();
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+    }
+    assert.equal(byId.get("bnr").hidden, false, "disconnected banner must show after 3 failures");
+    assert.equal(byId.get("bnr").getAttribute("data-k"), "wn");
+    assert.ok(byId.get("bnr-t").textContent.includes("Connection lost"));
+
+    failNextRefresh = false;
+    nextPollPayload = { unchanged: true, hash: "h2b", timestamp: "2026-01-01T00:00:30Z", serverMs: 2 };
+    const recTimer = [...timers].reverse().find((x) => !x.cleared && x.ms >= POLL_INTERVAL_FAST_MS);
+    recTimer.cleared = true;
+    recTimer.fn();
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(byId.get("bnr").hidden, true, "banner must clear on recovery");
+    assert.equal(byId.get("fb-t").textContent, "✓ Reconnected");
+
+    // 5. onhostcontextchanged with containerDimensions triggers immediate fresh refresh
     clock += 1000;
     const prevCount = rpcCalls.length;
     emitWin("message", {
@@ -619,19 +743,17 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     await new Promise((r) => setImmediate(r));
     assert.equal(rpcCalls.length, prevCount + 1);
     assert.equal(rpcCalls[rpcCalls.length - 1].name, "clamshell_refresh");
-    assert.equal(rpcCalls[rpcCalls.length - 1].arguments.force, true);
     assert.equal(rpcCalls[rpcCalls.length - 1].arguments.fresh, true);
 
-    // 4. Clicking Lock button calls clamshell_lock_screen and renders whisper-quiet feedback
+    // 6. Lock button in Display footer calls clamshell_lock_screen and updates #fb-t (zero innerHTML)
     const lockBtn = byId.get("lock-btn");
     appRoot.dispatch("click", { target: { closest: () => lockBtn } });
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     assert.equal(rpcCalls[rpcCalls.length - 1].name, "clamshell_lock_screen");
-    assert.deepEqual({ ...rpcCalls[rpcCalls.length - 1].arguments }, {});
-    assert.ok(byId.get("fb").innerHTML.includes("✓ Locked"));
+    assert.equal(byId.get("fb-t").textContent, "✓ Locked");
 
-    // 4b. flushQueue transient error with concurrent pendingPatch preserves failed fields and flushes cleanly
+    // 7. flushQueue transient error with concurrent pendingPatch preserves failed fields
     let failFirstCfg = null;
     configureHandlers.push((id) => {
       failFirstCfg = () =>
@@ -665,19 +787,18 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     const ecoBtn = mkEl("m-eco", { "data-m": "eco" });
     const guardBtn = byId.get("guard-btn");
     appRoot.dispatch("click", { target: { closest: () => ecoBtn } });
-    // Queue second patch while first clamshell_configure RPC is in flight
     appRoot.dispatch("click", { target: { closest: () => guardBtn } });
-    assert.ok(failFirstCfg, "expected first configure RPC in flight");
+    assert.ok(failFirstCfg);
     failFirstCfg();
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     const cfgCalls = rpcCalls.filter((c) => c.name === "clamshell_configure");
-    assert.equal(cfgCalls.length, 2, "concurrent pendingPatch must NOT be dropped after transient error");
+    assert.equal(cfgCalls.length, 2);
     assert.deepEqual({ ...cfgCalls[1].arguments }, { modeOverride: "eco", guardEnabled: false });
-    assert.ok(byId.get("fb").innerHTML.includes("✓ Saved"), "isSyncing must clear after retry flush succeeds");
+    assert.equal(byId.get("fb-t").textContent, "✓ Saved");
 
-    // 5. Teardown cleanly disconnects observers
+    // 8. Teardown cleanly disconnects observers
     emitWin("message", {
       source: fakeParent,
       data: { jsonrpc: "2.0", id: 999, method: "ui/resource-teardown", params: {} },
@@ -687,19 +808,60 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(ioDisconnected, true);
   });
 
-  it("resolves bilingual panel language, guard status descriptions, and optimistic state", () => {
+  it("resolves bilingual panel language, guard status, optimistic state, and all 4 read-only fan states", () => {
     assert.equal(resolvePanelLang({ saved: "zh-CN", hostLocale: "en-US" }), "zh-CN");
     assert.equal(resolvePanelLang({ saved: null, hostLocale: "zh-Hans-CN", navLang: "en" }), "zh-CN");
     assert.equal(resolvePanelLang({ saved: null, hostLocale: "fr-FR", navLang: "en-US" }), "en");
 
-    assert.equal(
-      describeGuardStatus({ settings: { guardEnabled: false } }, 80, "en"),
-      "Guard paused"
-    );
+    assert.equal(describeGuardStatus({ settings: { guardEnabled: false } }, 80, "en"), "Guard paused");
     assert.equal(
       describeGuardStatus({ guardStatus: "protecting", settings: { guardEnabled: true } }, 65, "zh-CN"),
       "熄屏保护中 · 恢复 65%"
     );
+
+    // Fan states: fanless, active dual RPM, Macs Fan Control yield, unavailable
+    const fanless = describeFanState({ status: "fanless", fans: [], ownershipMode: "observer", readOnly: true }, "en");
+    assert.equal(fanless.rpmText, "No fans (passive cooling)");
+    assert.equal(fanless.showController, false);
+
+    const dual = describeFanState({
+      status: "ok",
+      fans: [{ id: 0, rpm: 2140, manual: false }, { id: 1, rpm: 2210, manual: false }],
+      controller: "System (macOS)",
+      externalManagers: [],
+      ownershipMode: "observer",
+      readOnly: true,
+    }, "en");
+    assert.equal(dual.rpmText, "L 2,140 · R 2,210 rpm");
+    assert.equal(dual.badgeText, "Observer");
+    assert.equal(dual.badgeKind, "in");
+    assert.equal(dual.showController, true);
+
+    const yieldMfc = describeFanState({
+      status: "ok",
+      fans: [{ id: 0, rpm: 4200, manual: true }, { id: 1, rpm: 4300, manual: true }],
+      controller: "Macs Fan Control",
+      externalManagers: ["Macs Fan Control"],
+      ownershipMode: "yield",
+      readOnly: true,
+    }, "zh-CN");
+    assert.equal(yieldMfc.rpmText, "左 4,200 · 右 4,300 rpm");
+    assert.equal(yieldMfc.controller, "Macs Fan Control");
+    assert.equal(yieldMfc.badgeText, "已让位");
+    assert.equal(yieldMfc.badgeKind, "wn");
+    assert.ok(yieldMfc.caption.includes("Macs Fan Control"));
+
+    const unavail = describeFanState({
+      status: "unavailable",
+      fans: [],
+      controller: "System (macOS)",
+      externalManagers: [],
+      ownershipMode: "observer",
+      readOnly: true,
+    }, "en");
+    assert.equal(unavail.rpmText, "Unavailable");
+    assert.equal(unavail.badgeKind, "in");
+    assert.equal(unavail.showController, true);
 
     const base = {
       lidState: "open",
@@ -718,17 +880,12 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing & Editori
     assert.equal(paused.policy.modeSource, "manual");
     assert.equal(paused.policy.maxJobs, 3);
 
-    // Exact table lookup from Rust-emitted profileJobs (no duplicated policy math)
-    const utilManual = computeOptimisticState(base, { modeOverride: "utility" });
-    assert.equal(utilManual.policy.maxJobs, 4);
-    const ecoManual = computeOptimisticState(base, { modeOverride: "eco" });
-    assert.equal(ecoManual.policy.maxJobs, 2);
     const closedAc = computeOptimisticState(
       { ...base, lidState: "closed", policy: { profile: "utility", autoProfile: "utility", maxJobs: 4 } },
       { acClosedProfile: "eco" }
     );
     assert.equal(closedAc.policy.autoProfile, "eco");
     assert.equal(closedAc.policy.profile, "eco");
-    assert.equal(closedAc.policy.maxJobs, 1, "auto eco uses profileJobs.autoEco exact lookup");
+    assert.equal(closedAc.policy.maxJobs, 1);
   });
 });

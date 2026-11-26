@@ -33,10 +33,6 @@ pub struct GuardTickPlan {
     pub sleep_display: bool,
 }
 
-fn is_false(v: &bool) -> bool {
-    !*v
-}
-
 pub fn in_post_restore_watch(state: &GuardState, now: f64) -> bool {
     state.machine.last_restore_ts > 0.0
         && (now - state.machine.last_restore_ts) >= 0.0
@@ -57,10 +53,6 @@ pub fn guard_is_open_restoring(state: &GuardState, now: f64) -> bool {
             || in_post_restore_watch(state, now))
 }
 
-pub fn is_external_guard_active(data_dir: &Path) -> bool {
-    crate::launchagent::is_launchagent_active() || DaemonLock::is_active(data_dir)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DisplayInfo {
@@ -71,49 +63,6 @@ pub struct DisplayInfo {
     pub builtin_count: usize,
     pub external_count: usize,
     pub mode: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DisplayGuardSummary {
-    pub last_lid: String,
-    pub saved_brightness: Option<f64>,
-    pub last_sleep_ts: f64,
-    pub needs_restore: bool,
-    pub user_target: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub user_override_thermal: bool,
-    pub thermal_capped: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pre_thermal_brightness: Option<f64>,
-}
-
-impl From<&GuardState> for DisplayGuardSummary {
-    fn from(s: &GuardState) -> Self {
-        let effective_thermal_cap =
-            s.machine.thermal_capped && !s.user_intent.user_override_thermal;
-        Self {
-            last_lid: s.machine.last_lid.clone(),
-            saved_brightness: if s.user_intent.saved_brightness.is_finite() {
-                Some((s.user_intent.saved_brightness * 1000.0).round() / 1000.0)
-            } else {
-                None
-            },
-            last_sleep_ts: s.machine.last_sleep_ts,
-            needs_restore: s.machine.needs_restore,
-            user_target: s.user_intent.user_target,
-            user_override_thermal: s.user_intent.user_override_thermal,
-            thermal_capped: effective_thermal_cap,
-            pre_thermal_brightness: if effective_thermal_cap {
-                s.machine
-                    .pre_thermal_brightness
-                    .filter(|v| v.is_finite())
-                    .map(|v| (v * 1000.0).round() / 1000.0)
-            } else {
-                None
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,17 +154,12 @@ pub fn apply_user_brightness_with_thermal(
     let (builtins, _externals) = display.get_displays();
     let mut next = state.clone();
 
-    let asleep = !builtins.is_empty()
-        && builtins
-            .iter()
-            .all(|&d| display.is_asleep(d).unwrap_or(false));
-    let cur_pct = builtins
-        .first()
-        .and_then(|&d| display.get_brightness(d))
-        .and_then(level_to_percent);
+    if builtins.is_empty() && closed != Some(true) {
+        return Err("no built-in display detected on this Mac".to_string());
+    }
 
-    if closed == Some(true) {
-        // Thermal safety: never raise built-in backlight while lid is closed; persist user intent.
+    let sleep_states: Vec<_> = builtins.iter().map(|&id| display.is_asleep(id)).collect();
+    if closed != Some(false) || sleep_states.iter().any(|&state| state != Some(false)) {
         next.user_intent.saved_brightness = level_f64;
         next.user_intent.user_target = true;
         next.user_intent.user_override_thermal = false;
@@ -228,46 +172,20 @@ pub fn apply_user_brightness_with_thermal(
                 applied: false,
                 deferred: true,
                 mode: "saved_target".to_string(),
-                percent: Some(cur_pct.unwrap_or(0)),
+                percent: builtins
+                    .first()
+                    .and_then(|&id| display.get_brightness(id))
+                    .and_then(level_to_percent),
                 saved_percent: target_pct,
-                asleep: true,
-            },
-        ));
-    }
-
-    if builtins.is_empty() {
-        return Err("no built-in display detected on this Mac".to_string());
-    }
-
-    if asleep {
-        // Safety: if lid state is unknown (`None`) while the built-in display is asleep,
-        // the lid may be physically closed—defer to `saved_target` without writing hardware.
-        let applied = if closed == Some(false) {
-            builtins.iter().all(|&d| display.set_brightness(d, level_f32))
-        } else {
-            false
-        };
-        next.user_intent.saved_brightness = level_f64;
-        next.user_intent.user_target = true;
-        next.user_intent.user_override_thermal = false;
-        let changed = next != *state;
-        return Ok((
-            next,
-            changed,
-            BrightnessAction {
-                requested_percent: target_pct,
-                applied,
-                deferred: true,
-                mode: "saved_target".to_string(),
-                percent: Some(cur_pct.unwrap_or(0)),
-                saved_percent: target_pct,
-                asleep: true,
+                asleep: closed == Some(true) || sleep_states.contains(&Some(true)),
             },
         ));
     }
 
     // Lid is open and built-in display is awake -> apply immediately; surface real FFI errors.
-    let applied = builtins.iter().all(|&d| display.set_brightness(d, level_f32));
+    let applied = builtins
+        .iter()
+        .all(|&d| display.set_brightness(d, level_f32));
     if !applied {
         return Err("failed to set built-in display brightness via DisplayServices".to_string());
     }
@@ -316,7 +234,7 @@ pub fn apply_user_brightness(
     apply_user_brightness_with_thermal(percent, closed, "nominal", state, display)
 }
 
-/// Evaluate one deterministic Display Guard tick (closed-lid zeroing, wake-restore, and optional
+/// Evaluate one deterministic Display Guard tick (closed-lid sleep, wake-restore, and optional
 /// thermal cap) WITHOUT invoking blocking `pmset displaysleepnow` while holding `FileLock`.
 /// Callers MUST drop `FileLock` before executing `plan.sleep_display`.
 pub fn evaluate_guard_tick_plan(
@@ -359,30 +277,17 @@ pub fn evaluate_guard_tick_plan(
         next.machine.last_restore_ts = 0.0;
         next.user_intent.user_override_thermal = false;
 
-        let mut dimmed_any = false;
-        for &did in &builtins {
-            if let Some(cur) = display.get_brightness(did) {
-                if cur > 0.01 {
-                    let rounded = pre_cap_restore
-                        .unwrap_or_else(|| ((cur as f64) * 1000.0).round() / 1000.0);
-                    if !was_closed && !next.user_intent.user_target {
-                        next.user_intent.saved_brightness = rounded;
-                        next.user_intent.user_target = false;
-                    } else if !next.user_intent.user_target && next.user_intent.saved_brightness <= 0.0 {
-                        next.user_intent.saved_brightness = rounded;
-                    }
-                    if display.set_brightness(did, 0.0) {
-                        next.machine.needs_restore = true;
-                        dimmed_any = true;
-                    }
-                }
-            }
-        }
-        if !dimmed_any && !was_closed && !next.user_intent.user_target {
-            if let Some(pre) = pre_cap_restore {
-                next.user_intent.saved_brightness = pre;
-                next.user_intent.user_target = false;
-                next.machine.needs_restore = true;
+        if !was_closed && !next.user_intent.user_target {
+            let visible_brightness = builtins
+                .iter()
+                .filter(|&&id| display.is_asleep(id) == Some(false))
+                .filter_map(|&id| display.get_brightness(id))
+                .find(|&level| level > 0.01)
+                .map(|level| ((level as f64) * 1000.0).round() / 1000.0);
+            if let Some(saved) = pre_cap_restore.or(visible_brightness) {
+                next.user_intent.saved_brightness = saved;
+                // Retry once the display wakes after guard-triggered sleep or a thermal cap.
+                next.machine.needs_restore |= externals.is_empty() || pre_cap_restore.is_some();
             }
         }
 
@@ -390,9 +295,7 @@ pub fn evaluate_guard_tick_plan(
         if externals.is_empty() {
             let elapsed = (now - next.machine.last_sleep_ts).max(0.0);
             let any_awake = if !builtins.is_empty() {
-                builtins
-                    .iter()
-                    .any(|&d| display.is_asleep(d) != Some(true))
+                builtins.iter().any(|&d| display.is_asleep(d) != Some(true))
             } else {
                 elapsed >= FALLBACK_REENFORCE_SECS
             };
@@ -444,28 +347,27 @@ pub fn evaluate_guard_tick_plan(
             desired as f32
         };
 
-        let mut any_asleep = false;
+        let mut waiting_for_awake = false;
         let mut wrote_any = false;
-        let restored_ok = if user_target && target < 0.01 {
-            true
-        } else if !builtins.is_empty() {
+        let restored_ok = if !builtins.is_empty() {
             let mut all_ok = true;
             for &did in &builtins {
-                if display.is_asleep(did) == Some(true) {
-                    any_asleep = true;
+                if display.is_asleep(did) != Some(false) {
+                    waiting_for_awake = true;
                     all_ok = false;
                     continue;
                 }
                 let cur = display.get_brightness(did);
-                // When we dimmed the screen (`needs_restore`), or user set a closed/asleep target,
+                // When a restore is pending (`needs_restore`), or user set a closed/asleep target,
                 // or thermal capping is active, require brightness to match `target` rather than
                 // skipping on any `cur >= 0.02` (which left the screen dim after Auto-Brightness
                 // or a single F2 tap woke it at 3-10%).
                 let match_tol = (target * 0.4).clamp(0.005, 0.02);
                 let already_ok = if needs_restore || user_target || apply_cap {
-                    cur.map(|c| (c - target).abs() <= match_tol).unwrap_or(false)
+                    cur.map(|c| (c - target).abs() <= match_tol)
+                        .unwrap_or(false)
                 } else {
-                    // We never dimmed this display while closed; if macOS woke it to a visible
+                    // If macOS woke the display to a visible
                     // level on its own, keep and sync that level instead of overriding it.
                     cur.map(|c| c >= 0.02).unwrap_or(false)
                 };
@@ -511,8 +413,8 @@ pub fn evaluate_guard_tick_plan(
             } else {
                 next.machine.last_restore_ts = 0.0;
             }
-        } else if any_asleep {
-            // Built-in panel is still asleep after lid open: stay pending without exhausting retries.
+        } else if waiting_for_awake {
+            // Wait for a confirmed awake panel without exhausting write retries.
             next.machine.last_lid = "open".to_string();
             next.machine.needs_restore = true;
         } else {
@@ -550,7 +452,7 @@ pub fn evaluate_guard_tick_plan(
             0.20
         };
         for &did in &builtins {
-            if display.is_asleep(did) == Some(true) {
+            if display.is_asleep(did) != Some(false) {
                 continue;
             }
             if let Some(cur) = display.get_brightness(did) {
@@ -586,7 +488,7 @@ pub fn evaluate_guard_tick_plan(
             let mut restored_any = false;
             let mut all_ok = true;
             for &did in &builtins {
-                if display.is_asleep(did) == Some(true) {
+                if display.is_asleep(did) != Some(false) {
                     all_ok = false;
                     continue;
                 }
@@ -614,7 +516,7 @@ pub fn evaluate_guard_tick_plan(
         };
         let target = saved as f32;
         for &did in &builtins {
-            if display.is_asleep(did) == Some(true) {
+            if display.is_asleep(did) != Some(false) {
                 continue;
             }
             if let Some(cur) = display.get_brightness(did) {
@@ -626,7 +528,7 @@ pub fn evaluate_guard_tick_plan(
     } else if let Some(&primary) = builtins.first() {
         // Keep `saved_brightness` fresh while open & awake so keyboard/Control Center adjustments
         // are preserved even if macOS fades or disconnects the panel before our closed-lid tick.
-        if display.is_asleep(primary) != Some(true) {
+        if display.is_asleep(primary) == Some(false) {
             if let Some(cur) = display.get_brightness(primary) {
                 if cur > 0.01 {
                     let rounded = ((cur as f64) * 1000.0).round() / 1000.0;
@@ -660,8 +562,14 @@ pub fn evaluate_guard_tick_with_thermal(
     now: f64,
     display: &dyn DisplayBackend,
 ) -> (GuardState, bool) {
-    let plan =
-        evaluate_guard_tick_plan(closed, thermal_pressure, thermal_cap_pct, state, now, display);
+    let plan = evaluate_guard_tick_plan(
+        closed,
+        thermal_pressure,
+        thermal_cap_pct,
+        state,
+        now,
+        display,
+    );
     if plan.sleep_display {
         let _ = display.sleep_display_now();
     }
@@ -685,14 +593,11 @@ pub fn set_brightness_synced(
     probe: &dyn ProbeBackend,
     display: &dyn DisplayBackend,
 ) -> Result<BrightnessAction, String> {
-    let closed = match lid_override {
-        Some(v) => Some(v),
-        None => probe.lid_closed_fast(),
-    };
-    let pressure = probe.thermal_pressure_fast();
     let _lock = FileLock::acquire(data_dir, true)
         .map_err(|e| format!("failed to acquire display-guard lock: {e}"))?;
     let state = load_guard_state(data_dir);
+    let pressure = probe.thermal_pressure_fast();
+    let closed = lid_override.or_else(|| probe.lid_closed_fast());
     let (next, changed, action) =
         apply_user_brightness_with_thermal(percent, closed, &pressure, &state, display)?;
     if changed {
@@ -727,9 +632,9 @@ pub fn run_guard_tick_locked(
                 open_restoring: false,
             });
         };
-        let closed = probe.lid_closed_fast();
-        let pressure = probe.thermal_pressure_fast();
         let state = load_guard_state(data_dir);
+        let pressure = probe.thermal_pressure_fast();
+        let closed = probe.lid_closed_fast();
         let now = now_epoch_secs();
         let plan = evaluate_guard_tick_plan(
             closed,
@@ -759,7 +664,7 @@ pub fn run_guard_tick_locked(
 }
 
 pub fn run_watch_once(data_dir: &Path) -> Result<(), String> {
-    let probe = MacOsProbeBackend;
+    let probe = MacOsProbeBackend::default();
     let display = MacOsDisplayBackend;
     let mut outcome = run_guard_tick_locked(data_dir, &probe, &display)?;
     // When invoked on lid open (e.g. via LaunchAgent), follow through display wake and the
@@ -782,13 +687,14 @@ extern "C" fn handle_signal(_sig: libc::c_int) {
 
 pub fn run_watch_daemon(data_dir: &Path, interval_secs: u64) -> Result<(), String> {
     let _daemon_lock = DaemonLock::try_acquire(data_dir)
-        .map_err(|e| format!("failed to acquire display-guard daemon lock: {e}"))?;
+        .map_err(|e| format!("failed to acquire display-guard daemon lock: {e}"))?
+        .ok_or("another display-guard daemon already holds the lock")?;
     STOP_DAEMON.store(false, Ordering::Relaxed);
     unsafe {
         libc::signal(libc::SIGINT, handle_signal as *const () as usize);
         libc::signal(libc::SIGTERM, handle_signal as *const () as usize);
     }
-    let probe = MacOsProbeBackend;
+    let probe = MacOsProbeBackend::default();
     let display = MacOsDisplayBackend;
     let normal_dur = Duration::from_secs(interval_secs.clamp(2, 300));
     let fast_dur = Duration::from_millis(FAST_POLL_INTERVAL_MS);
@@ -811,12 +717,14 @@ pub fn run_watch_daemon(data_dir: &Path, interval_secs: u64) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::macos::{HardwareProbe, StaticHostInfo};
+    use crate::state::DisplayGuardSummary;
     use std::sync::Mutex;
 
     struct MockDisplay {
         builtins: Mutex<Vec<u32>>,
         externals: Mutex<Vec<u32>>,
-        asleep: Mutex<bool>,
+        asleep: Mutex<Option<bool>>,
         brightness: Mutex<Option<f32>>,
         fail_set: Mutex<bool>,
         drop_writes: Mutex<bool>,
@@ -830,7 +738,7 @@ mod tests {
             Self {
                 builtins: Mutex::new(vec![1]),
                 externals: Mutex::new(vec![]),
-                asleep: Mutex::new(asleep),
+                asleep: Mutex::new(Some(asleep)),
                 brightness: Mutex::new(Some(brightness)),
                 fail_set: Mutex::new(false),
                 drop_writes: Mutex::new(false),
@@ -850,7 +758,7 @@ mod tests {
             )
         }
         fn is_asleep(&self, _id: u32) -> Option<bool> {
-            Some(*self.asleep.lock().unwrap())
+            *self.asleep.lock().unwrap()
         }
         fn get_brightness(&self, _id: u32) -> Option<f32> {
             *self.brightness.lock().unwrap()
@@ -867,12 +775,107 @@ mod tests {
         }
         fn sleep_display_now(&self) -> bool {
             *self.sleeps.lock().unwrap() += 1;
-            *self.asleep.lock().unwrap() = true;
+            *self.asleep.lock().unwrap() = Some(true);
             true
         }
         fn lock_screen_now(&self) -> Result<&'static str, String> {
             Ok("mock")
         }
+    }
+
+    struct LidProbe<F>(F);
+
+    impl<F: Fn() -> Option<bool> + Send + Sync> ProbeBackend for LidProbe<F> {
+        fn static_host(&self) -> StaticHostInfo {
+            unreachable!("brightness does not probe the host")
+        }
+        fn probe_hardware(&self) -> HardwareProbe {
+            unreachable!("brightness only needs the fast probes")
+        }
+        fn lid_closed_fast(&self) -> Option<bool> {
+            (self.0)()
+        }
+    }
+
+    #[test]
+    fn brightness_checks_lid_after_waiting_for_guard_lock() {
+        let dir =
+            std::env::temp_dir().join(format!("clamshell-brightness-lock-{}", std::process::id()));
+        let guard = FileLock::acquire(&dir, true).unwrap().unwrap();
+        let closed = AtomicBool::new(false);
+        let probe = LidProbe(|| {
+            let observed = closed.load(Ordering::SeqCst);
+            assert!(FileLock::acquire(&dir, false).unwrap().is_none());
+            Some(observed)
+        });
+        let display = MockDisplay::new(0.7, false);
+        std::thread::scope(|scope| {
+            let (started, wait) = std::sync::mpsc::channel();
+            let (dir, probe, display) = (&dir, &probe, &display);
+            let writer = scope.spawn(move || {
+                started.send(()).unwrap();
+                set_brightness_synced(dir, 41.0, None, probe, display).unwrap()
+            });
+            wait.recv().unwrap();
+            closed.store(true, Ordering::SeqCst);
+            drop(guard);
+            assert_eq!(writer.join().unwrap().mode, "saved_target");
+        });
+        assert!(display.writes.lock().unwrap().is_empty());
+        assert_eq!(load_guard_state(&dir).user_intent.saved_brightness, 0.41);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn brightness_saves_intent_and_guard_waits_for_confirmed_awake_panel() {
+        let dir =
+            std::env::temp_dir().join(format!("clamshell-brightness-awake-{}", std::process::id()));
+        let display = MockDisplay::new(0.7, false);
+        for (closed, asleep) in [
+            (None, Some(false)),
+            (Some(false), None),
+            (Some(false), Some(true)),
+        ] {
+            *display.asleep.lock().unwrap() = asleep;
+            let action =
+                set_brightness_synced(&dir, 37.0, None, &LidProbe(|| closed), &display).unwrap();
+            assert_eq!(action.mode, "saved_target");
+            assert!(action.deferred);
+            assert!(!action.applied);
+            let state = load_guard_state(&dir);
+            assert_eq!(state.user_intent.saved_brightness, 0.37);
+            assert!(state.user_intent.user_target);
+            let outcome = run_guard_tick_locked(&dir, &LidProbe(|| closed), &display).unwrap();
+            assert!(outcome.fast_poll);
+            assert_eq!(load_guard_state(&dir).machine.restore_attempts, 0);
+            assert!(display.writes.lock().unwrap().is_empty());
+        }
+
+        *display.asleep.lock().unwrap() = Some(false);
+        run_guard_tick_locked(&dir, &LidProbe(|| Some(false)), &display).unwrap();
+        assert_eq!(*display.writes.lock().unwrap(), [(1, 0.37)]);
+        assert!(!load_guard_state(&dir).user_intent.user_target);
+
+        // An explicit override skips the lid probe, but still requires an awake display.
+        let override_probe = LidProbe(|| panic!("explicit lid override must skip probing"));
+        let action =
+            set_brightness_synced(&dir, 50.0, Some(false), &override_probe, &display).unwrap();
+        assert!(action.applied);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn daemon_refuses_to_start_when_the_ownership_lock_is_held() {
+        let dir = std::env::temp_dir().join(format!(
+            "clamshell-daemon-contention-{}",
+            std::process::id()
+        ));
+        let guard = DaemonLock::try_acquire(&dir).unwrap().unwrap();
+        let err = run_watch_daemon(&dir, 2).unwrap_err();
+        assert!(err.contains("another display-guard daemon already holds the lock"));
+        assert!(!crate::state::guard_state_path(&dir).exists());
+        drop(guard);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -918,13 +921,13 @@ mod tests {
         assert_eq!(act1.percent, Some(65));
         assert_eq!(st_u1.user_intent.saved_brightness, 0.65);
 
-        // 4. Open -> Closed captures 0.65, zeroes backlight, sleeps display
+        // 4. Open -> Closed captures 0.65 and sleeps the display
         let (st_c1, changed) = evaluate_guard_tick(Some(true), &st_u1, 300.0, &disp);
         assert!(changed);
         assert_eq!(st_c1.machine.last_lid, "closed");
         assert_eq!(st_c1.user_intent.saved_brightness, 0.65);
         assert!(st_c1.machine.needs_restore);
-        assert_eq!(*disp.brightness.lock().unwrap(), Some(0.0));
+        assert_eq!(*disp.brightness.lock().unwrap(), Some(0.65));
         assert_eq!(*disp.sleeps.lock().unwrap(), 1);
 
         // 5. While closed, user sets brightness target to 10% -> zero backlight writes, saves user_target
@@ -952,7 +955,7 @@ mod tests {
         assert_eq!(st_r1.machine.restore_attempts, 1);
 
         *disp.builtins.lock().unwrap() = vec![1];
-        *disp.asleep.lock().unwrap() = false;
+        *disp.asleep.lock().unwrap() = Some(false);
         let (st_r2, changed) = evaluate_guard_tick(Some(false), &st_r1, 410.0, &disp);
         assert!(changed);
         assert!(!st_r2.machine.needs_restore);
@@ -966,13 +969,14 @@ mod tests {
         let disp = MockDisplay::new(0.78, false);
         let open_st = GuardState::default();
 
-        // 1. Open -> Closed saves 0.78, dims to 0%, sleeps display
+        // 1. Open -> Closed saves 0.78 and sleeps the display
         let (st_closed, changed) = evaluate_guard_tick(Some(true), &open_st, 100.0, &disp);
         assert!(changed);
         assert_eq!(st_closed.user_intent.saved_brightness, 0.78);
         assert!(st_closed.machine.needs_restore);
-        assert!(*disp.asleep.lock().unwrap());
-        assert_eq!(*disp.brightness.lock().unwrap(), Some(0.0));
+        assert_eq!(*disp.asleep.lock().unwrap(), Some(true));
+        assert_eq!(*disp.brightness.lock().unwrap(), Some(0.78));
+        assert!(disp.writes.lock().unwrap().is_empty());
         assert!(guard_wants_fast_poll(&st_closed, 100.0));
 
         // 2. Lid opens while panel is STILL asleep for 5 ticks -> does NOT write or burn retries
@@ -990,7 +994,7 @@ mod tests {
 
         // 3. Panel wakes at dim 6% (Auto-Brightness or single F2 tap), AND WindowServer silently
         // drops the first write -> read-back catches it and retries without skipping via cur >= 0.02!
-        *disp.asleep.lock().unwrap() = false;
+        *disp.asleep.lock().unwrap() = Some(false);
         *disp.brightness.lock().unwrap() = Some(0.06);
         *disp.drop_writes.lock().unwrap() = true;
         let (st_drop, _) = evaluate_guard_tick(Some(false), &st, 116.0, &disp);
@@ -1025,13 +1029,13 @@ mod tests {
 
         // 8. If macOS already slept/zeroed display BEFORE our closed tick, saved 0.50 is preserved
         // and still restored when the screen wakes black, OR macOS's own visible wake is preserved.
-        *disp.asleep.lock().unwrap() = true;
+        *disp.asleep.lock().unwrap() = Some(true);
         *disp.brightness.lock().unwrap() = Some(0.0);
         let (st_pre_slept, _) = evaluate_guard_tick(Some(true), &st_synced, 140.0, &disp);
         assert!((st_pre_slept.user_intent.saved_brightness - 0.50).abs() < 0.005);
         assert!(!st_pre_slept.machine.needs_restore);
 
-        *disp.asleep.lock().unwrap() = false;
+        *disp.asleep.lock().unwrap() = Some(false);
         *disp.brightness.lock().unwrap() = Some(0.0);
         let (st_black_wake, _) = evaluate_guard_tick(Some(false), &st_pre_slept, 150.0, &disp);
         assert!(!st_black_wake.machine.needs_restore);
@@ -1194,7 +1198,7 @@ mod tests {
         assert!((disp.brightness.lock().unwrap().unwrap() - 0.40).abs() < 0.005);
 
         // 2. lid_closed == None while built-in display is asleep MUST defer safely with zero HW writes
-        *disp.asleep.lock().unwrap() = true;
+        *disp.asleep.lock().unwrap() = Some(true);
         *disp.brightness.lock().unwrap() = Some(0.0);
         disp.writes.lock().unwrap().clear();
         let (st_unknown_asleep, changed, act_defer) =
@@ -1269,7 +1273,8 @@ mod tests {
             fn sleep_display_now(&self) -> bool {
                 *self.sleeps.lock().unwrap() += 1;
                 let acquired = matches!(FileLock::acquire(&self.data_dir, false), Ok(Some(_)));
-                self.lock_free_during_sleep.store(acquired, Ordering::SeqCst);
+                self.lock_free_during_sleep
+                    .store(acquired, Ordering::SeqCst);
                 true
             }
             fn lock_screen_now(&self) -> Result<&'static str, String> {

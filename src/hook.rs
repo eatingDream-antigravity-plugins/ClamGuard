@@ -202,7 +202,7 @@ pub fn evaluate_hook<P: ProbeBackend>(
     let hw = probe.probe_hardware();
     let settings = preloaded_settings.unwrap_or_else(|| read_settings(data_dir));
     let cur_policy_sig = policy_settings_signature(&settings);
-    let lang = detect_lang(Some(&settings));
+    let lang = detect_lang(settings.lang.as_deref());
     let policy = compute_policy(
         &hw.lid_state,
         &hw.power_source,
@@ -237,7 +237,10 @@ pub fn evaluate_hook<P: ProbeBackend>(
         .map(|p| format!(" ({p}%)"))
         .unwrap_or_default();
     let sys_therm = match hw.cpu_speed_limit_pct {
-        Some(pct) => format!("{} (pressure={}, CPU_Speed_Limit={pct}%)", hw.thermal_state, hw.thermal_pressure),
+        Some(pct) => format!(
+            "{} (pressure={}, CPU_Speed_Limit={pct}%)",
+            hw.thermal_state, hw.thermal_pressure
+        ),
         None => format!("{} (pressure={})", hw.thermal_state, hw.thermal_pressure),
     };
     let topo_compact = format_topology_compact(&host.cpu_topology);
@@ -344,7 +347,7 @@ pub fn run_hook(event_arg: Option<&str>, data_dir: &Path) -> Value {
         .unwrap_or_else(|| "mac-clamshell-mcp".to_string());
 
     let input = parse_hook_stdin_early(io::stdin().lock());
-    let probe = MacOsProbeBackend;
+    let probe = MacOsProbeBackend::default();
     evaluate_hook(
         event_arg,
         input,
@@ -555,10 +558,12 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("profile=strict"));
-        assert!(r3["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
-            .as_str()
-            .unwrap()
-            .contains("强限保护模式"));
+        assert!(
+            r3["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+                .as_str()
+                .unwrap()
+                .contains("强限保护模式")
+        );
 
         // 4. Fresh SessionStart under normal emits {}
         let open = StubProbe::new("open", "ac");

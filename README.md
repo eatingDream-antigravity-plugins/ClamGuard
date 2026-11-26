@@ -24,7 +24,8 @@ Closed MacBooks running docked or remote builds often overheat and leave the int
 - **Turns off the closed built-in screen**: While Antigravity is open, the MCP server (`serve`) runs a lightweight display guard automatically—dropping backlight to 0% and sleeping the internal display on lid close, then restoring your previous brightness on wake.
 - **Throttles heavy builds automatically**: Adapts CPU priority and parallel job limits from lid state, AC vs. battery power, and macOS thermal pressure (Apple Silicon & Intel).
 - **Stays out of the way when open**: Silent in Antigravity while open and cool; only nudges the agent to wrap heavy commands and cap concurrency when throttled.
-- **Live bilingual panel, brightness & one-click lock**: Inspect status in Antigravity (`EN / 中文`), toggle the display guard or mode override, adjust brightness, or lock the screen without sleeping background jobs.
+- **Read-only fan telemetry & zero-conflict coexistence**: Reads live fan RPM via non-privileged IOKit `AppleSMC` allowlist (zero root, zero SMC writes) and automatically detects third-party fan managers (`Macs Fan Control`, `TG Pro`, `Stats`, `iStat Menus`, `smcFanControl`, `Fanny`), displaying `Observer` or `Yield` ownership without ever overriding your fan curves.
+- **Live bilingual panel, brightness & one-click lock**: Inspect lid, power, thermal, fan, and guard telemetry in Antigravity (`EN / 中文`), toggle the display guard or mode override, adjust brightness, or lock the screen (verified via macOS session lock state) without sleeping background jobs.
 
 | Mode | When it activates | What it does |
 | :--- | :--- | :--- |
@@ -35,7 +36,7 @@ Closed MacBooks running docked or remote builds often overheat and leave the int
 
 ## How Throttling Works & Privacy
 
-- **Process-scoped, zero root**: Needs no `sudo` and never touches NVRAM, SMC, kernel extensions, or global `pmset` settings. `mac-clamshell-mcp run` applies macOS `taskpolicy` QoS, POSIX `nice`, and standard build-concurrency variables only to the wrapped command tree, leaving other apps untouched with zero residue on exit.
+- **Process-scoped, zero root, read-only SMC**: Needs no `sudo` and never writes to NVRAM, SMC, kernel extensions, or global `pmset` settings. Fan telemetry uses strictly read-only IOKit `AppleSMC` keys and yields fan control to any detected third-party manager. `mac-clamshell-mcp run` applies macOS `taskpolicy` QoS, POSIX `nice`, and standard build-concurrency variables only to the wrapped command tree, leaving other apps untouched with zero residue on exit.
 - **Reversible user-space display guard**: Uses standard macOS `DisplayServices` user-space APIs (the same layer as Control Center) so your prior brightness restores cleanly when the lid opens or thermal pressure clears.
 - **100% local & private**: Zero network requests and no telemetry; settings and guard state stay in your local user directory with owner-only permissions.
 

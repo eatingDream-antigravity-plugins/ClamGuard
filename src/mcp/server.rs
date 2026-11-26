@@ -1,9 +1,10 @@
 use crate::mcp::telemetry::TelemetryEngine;
 use crate::mcp::tools::{
-    call_tool_json, list_resources_json, list_tools_json, read_resource_json, HtmlLoader,
+    call_tool_json, list_resources_json, list_tools_json, read_resource_json, HtmlLoader, APP_MIME,
     SERVER_NAME, SERVER_VERSION,
 };
 use crate::platform::display_ffi::{DisplayBackend, MacOsDisplayBackend};
+use crate::platform::fan::MacOsFanSensorSource;
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -14,8 +15,19 @@ use std::time::Duration;
 
 pub const DEFAULT_SERVE_GUARD_INTERVAL_MS: u64 = 5_000;
 
-pub fn handle_rpc_value<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+pub const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+const UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
+
+#[derive(Default)]
+pub struct McpSession {
+    apps_capable: bool,
+}
+
+pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     msg: &Value,
+    session: &mut McpSession,
     engine: &Arc<TelemetryEngine<P, D>>,
     html_loader: &HtmlLoader,
 ) -> Option<Value> {
@@ -46,14 +58,23 @@ pub fn handle_rpc_value<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             let client_proto = params
                 .get("protocolVersion")
                 .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("2024-11-05");
+                .filter(|s| SUPPORTED_PROTOCOL_VERSIONS.contains(s))
+                .unwrap_or(LATEST_PROTOCOL_VERSION);
+            session.apps_capable = params["capabilities"]["extensions"][UI_EXTENSION]
+                .as_object()
+                .is_some_and(|ui| match ui.get("mimeTypes") {
+                    None => true,
+                    Some(types) => types
+                        .as_array()
+                        .is_some_and(|types| types.iter().any(|v| v.as_str() == Some(APP_MIME))),
+                });
+            let mut capabilities = json!({"tools": {}, "resources": {}});
+            if session.apps_capable {
+                capabilities["extensions"] = json!({UI_EXTENSION: {"mimeTypes": [APP_MIME]}});
+            }
             Some(ok(json!({
                 "protocolVersion": client_proto,
-                "capabilities": {
-                    "tools": {},
-                    "resources": {}
-                },
+                "capabilities": capabilities,
                 "serverInfo": {
                     "name": SERVER_NAME,
                     "version": SERVER_VERSION
@@ -69,7 +90,7 @@ pub fn handle_rpc_value<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                 Err(e) => Some(err(-32602, e)),
             }
         }
-        "tools/list" => Some(ok(list_tools_json())),
+        "tools/list" => Some(ok(list_tools_json(session.apps_capable))),
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params
@@ -91,8 +112,9 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
     let engine = Arc::new(TelemetryEngine::new(
         data_dir.clone(),
         binary_path,
-        MacOsProbeBackend,
+        MacOsProbeBackend::default(),
         MacOsDisplayBackend,
+        MacOsFanSensorSource::default(),
     ));
     let html_loader = Arc::new(HtmlLoader::new(panel_html_override));
 
@@ -107,10 +129,14 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_SERVE_GUARD_INTERVAL_MS)
         .clamp(100, 300_000);
-    let fallback_daemon_lock = if crate::guard::is_external_guard_active(&data_dir) {
+    let fallback_daemon_lock = if crate::launchagent::is_launchagent_active()
+        || crate::state::DaemonLock::is_active(&data_dir)
+    {
         None
     } else {
-        crate::state::DaemonLock::try_acquire(&data_dir).ok().flatten()
+        crate::state::DaemonLock::try_acquire(&data_dir)
+            .ok()
+            .flatten()
     };
     let guard_handle = if let Some(daemon_lock) = fallback_daemon_lock {
         let e = Arc::clone(&engine);
@@ -120,7 +146,7 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
             .name("clamshell-guard".into())
             .spawn(move || {
                 let _lock = daemon_lock;
-                let probe = MacOsProbeBackend;
+                let probe = MacOsProbeBackend::default();
                 let display = MacOsDisplayBackend;
                 let normal_dur = Duration::from_millis(guard_interval_ms);
                 let fast_dur = Duration::from_millis(
@@ -132,9 +158,10 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
                         e.wait_guard_interval(normal_dur, &stop);
                         continue;
                     }
-                    let fast = crate::guard::run_guard_tick_locked(&guard_data_dir, &probe, &display)
-                        .map(|o| o.fast_poll)
-                        .unwrap_or(false);
+                    let fast =
+                        crate::guard::run_guard_tick_locked(&guard_data_dir, &probe, &display)
+                            .map(|o| o.fast_poll)
+                            .unwrap_or(false);
                     e.wait_guard_interval(if fast { fast_dur } else { normal_dur }, &stop);
                 }
             })
@@ -161,6 +188,7 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
     let mut line = String::new();
     let mut reader = stdin.lock();
     let mut io_res = Ok(());
+    let mut session = McpSession::default();
 
     loop {
         line.clear();
@@ -194,7 +222,8 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
             }
         };
 
-        if let Some(resp) = handle_rpc_value(&msg, &engine, &html_loader) {
+        if let Some(resp) = handle_rpc_value_with_session(&msg, &mut session, &engine, &html_loader)
+        {
             let mut out = stdout.lock().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = serde_json::to_writer(&mut *out, &resp)
                 .map_err(io::Error::other)
@@ -219,6 +248,7 @@ pub fn serve_stdio(data_dir: PathBuf, panel_html_override: Option<PathBuf>) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::fan::TestFanSensor;
     use crate::platform::macos::{HardwareProbe, MemorySummary, StaticHostInfo};
     use crate::policy::CpuTopology;
     use std::sync::Mutex;
@@ -300,6 +330,107 @@ mod tests {
     }
 
     #[test]
+    fn initialize_negotiates_supported_protocol_and_apps_per_session() {
+        let engine = Arc::new(TelemetryEngine::new(
+            std::env::temp_dir(),
+            "mac-clamshell-mcp".into(),
+            TestProbe { lid_closed: false },
+            TestDisplay {
+                builtins: vec![],
+                level: Mutex::new(0.0),
+            },
+            TestFanSensor("fanless"),
+        ));
+        let html = HtmlLoader::new(None);
+        let mut plain = McpSession::default();
+        let mut app = McpSession::default();
+        let initialize = |session: &mut McpSession, params| {
+            handle_rpc_value_with_session(
+                &json!({"id": 1, "method": "initialize", "params": params}),
+                session,
+                &engine,
+                &html,
+            )
+            .unwrap()
+        };
+        let list_tools = |session: &mut McpSession| {
+            handle_rpc_value_with_session(
+                &json!({"id": 2, "method": "tools/list"}),
+                session,
+                &engine,
+                &html,
+            )
+            .unwrap()
+        };
+
+        for version in SUPPORTED_PROTOCOL_VERSIONS {
+            let init = initialize(&mut plain, json!({"protocolVersion": version}));
+            assert_eq!(init["result"]["protocolVersion"], *version);
+        }
+        for params in [json!({"protocolVersion": "2099-01-01"}), json!({})] {
+            let init = initialize(&mut plain, params);
+            assert_eq!(init["result"]["protocolVersion"], LATEST_PROTOCOL_VERSION);
+            assert!(init["result"]["capabilities"].get("extensions").is_none());
+        }
+
+        for capability in [json!({}), json!({"mimeTypes": ["text/plain", APP_MIME]})] {
+            let init = initialize(
+                &mut app,
+                json!({
+                    "capabilities": {"extensions": {UI_EXTENSION: capability}}
+                }),
+            );
+            assert_eq!(
+                init["result"]["capabilities"]["extensions"][UI_EXTENSION]["mimeTypes"],
+                json!([APP_MIME])
+            );
+            assert_eq!(
+                list_tools(&mut app)["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                5
+            );
+        }
+        let tools = list_tools(&mut plain);
+        let names: Vec<_> = tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "clamshell_panel",
+                "clamshell_set_brightness",
+                "clamshell_lock_screen"
+            ]
+        );
+
+        for capability in [
+            json!({"mimeTypes": ["text/html"]}),
+            json!({"mimeTypes": null}),
+            json!(null),
+        ] {
+            let init = initialize(
+                &mut app,
+                json!({
+                    "capabilities": {"extensions": {UI_EXTENSION: capability}}
+                }),
+            );
+            assert!(init["result"]["capabilities"].get("extensions").is_none());
+            assert_eq!(
+                list_tools(&mut app)["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+        }
+    }
+
+    #[test]
     fn mcp_rpc_end_to_end_ssr_dedup_configure_brightness_and_desktop_error() {
         let dir =
             std::env::temp_dir().join(format!("mac-clamshell-mcp-test-{}", std::process::id()));
@@ -312,20 +443,24 @@ mod tests {
                 builtins: vec![1],
                 level: Mutex::new(0.0),
             },
+            TestFanSensor("active:2140,2210"),
         ));
         engine.set_bg_guard_active(true);
         let html_loader = HtmlLoader::new(None);
+        let mut session = McpSession::default();
 
-        let init = handle_rpc_value(
-            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}),
+        let init = handle_rpc_value_with_session(
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"extensions":{"io.modelcontextprotocol/ui":{}}}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
         .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "mac-clamshell-mcp");
 
-        let tools = handle_rpc_value(
+        let tools = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -352,8 +487,9 @@ mod tests {
             "boolean"
         );
 
-        let res = handle_rpc_value(
+        let res = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"ui://mac-clamshell-mcp/panel"}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -363,23 +499,34 @@ mod tests {
         assert!(html.contains("\"display\":"));
         assert!(!html.contains("/*__MAC_CLAMSHELL_BOOT__*/"));
 
-        let panel = handle_rpc_value(
+        let panel = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"clamshell_panel","arguments":{}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
         .unwrap();
-        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["normal"], 8);
-        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["utility"], 2);
-        assert_eq!(panel["result"]["structuredContent"]["profileJobs"]["strict"], 1);
+        assert_eq!(
+            panel["result"]["structuredContent"]["profileJobs"]["normal"],
+            8
+        );
+        assert_eq!(
+            panel["result"]["structuredContent"]["profileJobs"]["utility"],
+            2
+        );
+        assert_eq!(
+            panel["result"]["structuredContent"]["profileJobs"]["strict"],
+            1
+        );
         let hash = panel["result"]["structuredContent"]["hash"]
             .as_str()
             .unwrap()
             .to_string();
 
         // Matching ifHash returns minimal unchanged: true (including fresh: true live bypass)
-        let poll = handle_rpc_value(
+        let poll = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":hash,"force":false}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -387,26 +534,35 @@ mod tests {
         assert_eq!(poll["result"]["structuredContent"]["unchanged"], true);
         assert_eq!(poll["result"]["content"][0]["text"], "unchanged");
 
-        let fresh_poll = handle_rpc_value(
+        let fresh_poll = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"clamshell_refresh","arguments":{"ifHash":hash,"fresh":true}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
         .unwrap();
         assert_eq!(fresh_poll["result"]["structuredContent"]["unchanged"], true);
-        assert_eq!(fresh_poll["result"]["structuredContent"]["fromCache"], false);
+        assert_eq!(
+            fresh_poll["result"]["structuredContent"]["fromCache"],
+            false
+        );
 
-        let fresh_panel = handle_rpc_value(
+        let fresh_panel = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"clamshell_panel","arguments":{"fresh":true}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
         .unwrap();
-        assert_eq!(fresh_panel["result"]["structuredContent"]["fromCache"], false);
+        assert_eq!(
+            fresh_panel["result"]["structuredContent"]["fromCache"],
+            false
+        );
 
         // Lock screen tool returns { ok: true, method, locked_at_ms }
-        let locked = handle_rpc_value(
+        let locked = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"clamshell_lock_screen","arguments":{}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -422,8 +578,9 @@ mod tests {
         );
 
         // Closed-lid set_brightness updates saved restore target safely without waking backlight
-        let br = handle_rpc_value(
+        let br = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{"percent":45}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -439,8 +596,9 @@ mod tests {
         );
 
         // Configure policy + guardEnabled toggle updates profile, guardStatus, and hash
-        let cfg = handle_rpc_value(
+        let cfg = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"clamshell_configure","arguments":{"modeOverride":"utility","maxJobsOverride":2,"guardEnabled":false}}}),
+            &mut session,
             &engine,
             &html_loader,
         )
@@ -449,10 +607,7 @@ mod tests {
             cfg["result"]["structuredContent"]["policy"]["profile"],
             "utility"
         );
-        assert_eq!(
-            cfg["result"]["structuredContent"]["guardStatus"],
-            "paused"
-        );
+        assert_eq!(cfg["result"]["structuredContent"]["guardStatus"], "paused");
         assert_ne!(
             cfg["result"]["structuredContent"]["hash"].as_str().unwrap(),
             hash
@@ -477,9 +632,11 @@ mod tests {
                 builtins: vec![],
                 level: Mutex::new(0.0),
             },
+            TestFanSensor("active:2140,2210"),
         ));
-        let desktop_err = handle_rpc_value(
+        let desktop_err = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{"percent":50}}}),
+            &mut session,
             &desktop_engine,
             &html_loader,
         )
@@ -490,8 +647,9 @@ mod tests {
             .unwrap()
             .contains("亮度调节失败"));
 
-        let missing_pct_err = handle_rpc_value(
+        let missing_pct_err = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{}}}),
+            &mut session,
             &desktop_engine,
             &html_loader,
         )

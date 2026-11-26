@@ -125,6 +125,50 @@ mod darwin {
         set_brightness: DsSetBrightnessFn,
     }
 
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGSessionCopyCurrentDictionary() -> *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithCString(
+            allocator: *const c_void,
+            value: *const libc::c_char,
+            encoding: u32,
+        ) -> *const c_void;
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+        fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFBooleanGetValue(value: *const c_void) -> u8;
+        fn CFRelease(value: *const c_void);
+    }
+
+    pub fn session_is_locked() -> Option<bool> {
+        // The dictionary and key are owned references. The value is borrowed from the dictionary.
+        unsafe {
+            let dict = CGSessionCopyCurrentDictionary();
+            if dict.is_null() {
+                return None;
+            }
+            let key = CFStringCreateWithCString(
+                std::ptr::null(),
+                c"CGSSessionScreenIsLocked".as_ptr(),
+                0x0800_0100, // kCFStringEncodingUTF8
+            );
+            let locked = if key.is_null() {
+                None
+            } else {
+                let val = CFDictionaryGetValue(dict, key);
+                CFRelease(key);
+                (!val.is_null() && CFGetTypeID(val) == CFBooleanGetTypeID())
+                    .then(|| CFBooleanGetValue(val) != 0)
+            };
+            CFRelease(dict);
+            locked
+        }
+    }
+
     unsafe fn load_sym(handle: *mut c_void, name: &str) -> Option<*mut c_void> {
         let c = CString::new(name).ok()?;
         let ptr = libc::dlsym(handle, c.as_ptr());
@@ -138,10 +182,9 @@ mod darwin {
     fn cg_api() -> Option<&'static CgApi> {
         static CG: OnceLock<Option<CgApi>> = OnceLock::new();
         CG.get_or_init(|| unsafe {
-            let path = CString::new(
-                "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics",
-            )
-            .ok()?;
+            let path =
+                CString::new("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+                    .ok()?;
             let handle = libc::dlopen(path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
             if handle.is_null() {
                 return None;
@@ -149,12 +192,14 @@ mod darwin {
             let get_online = std::mem::transmute::<*mut c_void, CgGetOnlineDisplayListFn>(
                 load_sym(handle, "CGGetOnlineDisplayList")?,
             );
-            let is_builtin = std::mem::transmute::<*mut c_void, CgDisplayIsBuiltinFn>(
-                load_sym(handle, "CGDisplayIsBuiltin")?,
-            );
-            let is_asleep = std::mem::transmute::<*mut c_void, CgDisplayIsAsleepFn>(
-                load_sym(handle, "CGDisplayIsAsleep")?,
-            );
+            let is_builtin = std::mem::transmute::<*mut c_void, CgDisplayIsBuiltinFn>(load_sym(
+                handle,
+                "CGDisplayIsBuiltin",
+            )?);
+            let is_asleep = std::mem::transmute::<*mut c_void, CgDisplayIsAsleepFn>(load_sym(
+                handle,
+                "CGDisplayIsAsleep",
+            )?);
             Some(CgApi {
                 get_online,
                 is_builtin,
@@ -175,12 +220,14 @@ mod darwin {
             if handle.is_null() {
                 return None;
             }
-            let get_brightness = std::mem::transmute::<*mut c_void, DsGetBrightnessFn>(
-                load_sym(handle, "DisplayServicesGetBrightness")?,
-            );
-            let set_brightness = std::mem::transmute::<*mut c_void, DsSetBrightnessFn>(
-                load_sym(handle, "DisplayServicesSetBrightness")?,
-            );
+            let get_brightness = std::mem::transmute::<*mut c_void, DsGetBrightnessFn>(load_sym(
+                handle,
+                "DisplayServicesGetBrightness",
+            )?);
+            let set_brightness = std::mem::transmute::<*mut c_void, DsSetBrightnessFn>(load_sym(
+                handle,
+                "DisplayServicesSetBrightness",
+            )?);
             Some(DsApi {
                 get_brightness,
                 set_brightness,
@@ -263,6 +310,23 @@ mod darwin {
     }
 }
 
+fn confirm_display_sleep_lock(
+    mut session_is_locked: impl FnMut() -> Option<bool>,
+    timeout: Duration,
+) -> Result<&'static str, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if session_is_locked() == Some(true) {
+            return Ok("pmset");
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("pmset put the display to sleep without a verified macOS session lock; a password-after-sleep delay may be configured".to_string());
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(40)));
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn run_cmd_status(cmd: &str, args: &[&str], timeout_ms: u64) -> bool {
     let Ok(mut child) = Command::new(cmd)
@@ -314,7 +378,8 @@ impl DisplayBackend for MacOsDisplayBackend {
 
     fn is_asleep(&self, display_id: u32) -> Option<bool> {
         if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
-            "none" | "desktop" | "docked" => None,
+            "none" | "desktop" | "docked" | "unknown_sleep" => None,
+            "asleep" => Some(true),
             _ => Some(st.asleep),
         }) {
             return res;
@@ -390,10 +455,14 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn lock_screen_now(&self) -> Result<&'static str, String> {
-        if let Some(res) = with_mock_display(|st| {
-            if st.mode == "fail_lock" {
-                Err("mock lock screen failed".to_string())
-            } else {
+        if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
+            "fail_lock" => Err("mock lock screen failed".to_string()),
+            "pmset_locked" | "pmset_unconfirmed" => {
+                st.asleep = true;
+                st.locked = st.mode == "pmset_locked";
+                confirm_display_sleep_lock(|| Some(st.locked), Duration::ZERO)
+            }
+            _ => {
                 st.locked = true;
                 Ok("mock")
             }
@@ -413,7 +482,10 @@ impl DisplayBackend for MacOsDisplayBackend {
                 return Ok("CGSession");
             }
             if run_cmd_status("/usr/bin/pmset", &["displaysleepnow"], 3000) {
-                return Ok("pmset");
+                return confirm_display_sleep_lock(
+                    darwin::session_is_locked,
+                    Duration::from_millis(800),
+                );
             }
             Err("failed to lock screen via SACLockScreenImmediate, CGSession, or pmset".to_string())
         }
@@ -427,6 +499,19 @@ impl DisplayBackend for MacOsDisplayBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_sleep_requires_confirmed_macos_session_lock() {
+        let mut states = [None, Some(false), Some(true)].into_iter();
+        assert_eq!(
+            confirm_display_sleep_lock(|| states.next().unwrap(), Duration::from_millis(200)),
+            Ok("pmset")
+        );
+        for state in [None, Some(false)] {
+            let err = confirm_display_sleep_lock(|| state, Duration::ZERO).unwrap_err();
+            assert!(err.contains("display to sleep without a verified macOS session lock"));
+        }
+    }
 
     fn mock_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();

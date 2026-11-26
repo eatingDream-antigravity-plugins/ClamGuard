@@ -16,14 +16,8 @@ const distDir = path.join(__dirname, "dist");
 const outHtml = path.join(distDir, "panel.html");
 const BOOT_TOKEN = "/*__MAC_CLAMSHELL_BOOT__*/";
 const MODULES = ["bridge.js", "polling.js", "brightness.js", "model.js"];
-
-function compactHtmlTemplates(src) {
-  return src
-    .replace(/\n[ \t]*</g, "<")
-    .replace(/>\n[ \t]*/g, ">")
-    .replace(/\n[ \t]*\$\{/g, "${")
-    .replace(/\}\n[ \t]*/g, "}");
-}
+const SIZE_FAIL_BYTES = 46_080;
+const SIZE_WARN_BYTES = 44_000;
 
 function tryLoadEsbuild() {
   for (const mod of [process.env.ESBUILD_PATH, "esbuild"].filter(Boolean)) {
@@ -36,14 +30,12 @@ function tryBunBundle() {
   let tmpDir = "";
   try {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mc-pack-"));
-    for (const f of MODULES) {
+    for (const f of [...MODULES, "app.js"]) {
       fs.writeFileSync(path.join(tmpDir, f), fs.readFileSync(path.join(__dirname, f), "utf8"), "utf8");
     }
-    const tmpEntry = path.join(tmpDir, "app.js");
-    fs.writeFileSync(tmpEntry, compactHtmlTemplates(fs.readFileSync(entryJs, "utf8")), "utf8");
     const out = execFileSync(
       "bun",
-      ["build", tmpEntry, "--bundle", "--minify", "--format=iife", "--target=browser"],
+      ["build", path.join(tmpDir, "app.js"), "--bundle", "--minify", "--format=iife", "--target=browser"],
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }
     );
     return out.trim() ? out.trim() : null;
@@ -73,7 +65,15 @@ function fallbackMinifyCss(css) {
     .replace(/\s+/g, " ")
     .replace(/\s*([{}:;,>+~])\s*/g, "$1")
     .replace(/;}/g, "}")
+    .trim();
+}
+
+function cleanCss(css) {
+  return css
+    .replace(/--buncss-[a-z0-9-]+:[^;}"']+;?/gi, "")
     .replace(/--([a-z0-9-]+):\s+/gi, "--$1:")
+    .replace(/;}/g, "}")
+    .replace(/<\/style/gi, "<\\/style")
     .trim();
 }
 
@@ -81,9 +81,9 @@ function fallbackBundleJs() {
   const parts = MODULES.map((f) =>
     fs.readFileSync(path.join(__dirname, f), "utf8").replace(/^\s*export\s+/gm, "")
   );
-  const appSrc = compactHtmlTemplates(
-    fs.readFileSync(entryJs, "utf8").replace(/^\s*import\s+[\s\S]*?from\s+["']\.\/[^"']+["'];?\s*/gm, "")
-  );
+  const appSrc = fs
+    .readFileSync(entryJs, "utf8")
+    .replace(/^\s*import\s+[\s\S]*?from\s+["']\.\/[^"']+["'];?\s*/gm, "");
   return `(()=>{${parts.join("\n")}\n${appSrc}})();`;
 }
 
@@ -95,15 +95,6 @@ let bundler = "fallback";
 
 if (esbuild) {
   bundler = "esbuild";
-  const compactHtmlTemplatesPlugin = {
-    name: "compact-html-templates",
-    setup(build) {
-      build.onLoad({ filter: /\/app\.js$/ }, async (args) => {
-        const src = await fs.promises.readFile(args.path, "utf8");
-        return { contents: compactHtmlTemplates(src), loader: "js" };
-      });
-    },
-  };
   const result = await esbuild.build({
     entryPoints: [entryJs],
     bundle: true,
@@ -114,7 +105,6 @@ if (esbuild) {
     format: "iife",
     platform: "browser",
     target: ["es2022"],
-    plugins: [compactHtmlTemplatesPlugin],
     write: false,
   });
   jsCode = result.outputFiles[0].text.trim().replace(/<\/script/gi, "<\\/script");
@@ -124,7 +114,7 @@ if (esbuild) {
     charset: "utf8",
     legalComments: "none",
   });
-  cssCode = minCss.code.trim().replace(/--([a-z0-9-]+):\s+/gi, "--$1:").replace(/<\/style/gi, "<\\/style");
+  cssCode = cleanCss(minCss.code);
 } else {
   const bunJs = tryBunBundle();
   if (bunJs) {
@@ -133,14 +123,13 @@ if (esbuild) {
   } else {
     jsCode = fallbackBundleJs().replace(/<\/script/gi, "<\\/script");
   }
-  cssCode = (tryBunCss() || fallbackMinifyCss(rawCss))
-    .replace(/--([a-z0-9-]+):\s+/gi, "--$1:")
-    .replace(/<\/style/gi, "<\\/style");
+  cssCode = cleanCss(tryBunCss() || fallbackMinifyCss(rawCss));
 }
 
 const template = fs
   .readFileSync(templatePath, "utf8")
   .replace(/>\s+</g, "><")
+  .replace(/\r?\n/g, "")
   .trim();
 
 if (!template.includes(BOOT_TOKEN)) {
@@ -151,11 +140,20 @@ const html = template
   .replace("/*__INLINE_CSS__*/", () => cssCode)
   .replace("/*__INLINE_JS__*/", () => jsCode);
 
+const jsBytes = Buffer.byteLength(jsCode, "utf8");
+const cssBytes = Buffer.byteLength(cssCode, "utf8");
+const totalBytes = Buffer.byteLength(html, "utf8");
+
+if (totalBytes >= SIZE_FAIL_BYTES) {
+  throw new Error(`panel.html exceeds hard size gate: ${totalBytes} B >= ${SIZE_FAIL_BYTES} B`);
+}
+if (totalBytes > SIZE_WARN_BYTES) {
+  console.warn(`WARN: panel.html (${totalBytes} B) exceeds ${SIZE_WARN_BYTES} B warning threshold`);
+}
+
 fs.mkdirSync(distDir, { recursive: true });
 fs.writeFileSync(outHtml, html, "utf8");
 
-const totalBytes = Buffer.byteLength(html, "utf8");
-const jsKb = (Buffer.byteLength(jsCode, "utf8") / 1024).toFixed(1);
-const cssKb = (Buffer.byteLength(cssCode, "utf8") / 1024).toFixed(1);
-const totalKb = (totalBytes / 1024).toFixed(1);
-console.log(`Built ${outHtml} (${totalKb} KiB total: JS ${jsKb} KiB + CSS ${cssKb} KiB, bundler=${bundler})`);
+console.log(
+  `Built ${outHtml} (${totalBytes} B / ${(totalBytes / 1024).toFixed(1)} KiB total: JS ${jsBytes} B + CSS ${cssBytes} B, bundler=${bundler})`
+);

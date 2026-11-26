@@ -5,8 +5,9 @@ use crate::launchagent::{
     guard_service_status, install_launchagent, uninstall_launchagent, DEFAULT_GUARD_INTERVAL_SECS,
 };
 use crate::mcp::server::serve_stdio;
-use crate::mcp::telemetry::TelemetryEngine;
+use crate::mcp::telemetry::{format_fan, TelemetryEngine};
 use crate::platform::display_ffi::{DisplayBackend, MacOsDisplayBackend};
+use crate::platform::fan::MacOsFanSensorSource;
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::policy::{format_lid, format_power, format_profile, format_thermal, format_topology};
 use crate::runner::{execute_run, RunOptions};
@@ -212,8 +213,9 @@ fn cmd_status(args: &[String]) -> i32 {
     let engine = TelemetryEngine::new(
         data_dir,
         binary_path,
-        MacOsProbeBackend,
+        MacOsProbeBackend::default(),
         MacOsDisplayBackend,
+        MacOsFanSensorSource::default(),
     );
     let collected = engine.collect(true);
     let s = &collected.snapshot;
@@ -253,7 +255,10 @@ fn cmd_status(args: &[String]) -> i32 {
                     } else {
                         String::new()
                     };
-                    format!("已合盖，恢复目标 {}%{ext}", s.display.saved_percent.unwrap_or(20))
+                    format!(
+                        "已合盖，恢复目标 {}%{ext}",
+                        s.display.saved_percent.unwrap_or(20)
+                    )
                 } else if s.display.asleep {
                     format!(
                         "已熄屏，恢复目标 {}%",
@@ -290,11 +295,15 @@ fn cmd_status(args: &[String]) -> i32 {
                 format_power(&s.power_source, s.battery_pct, lang)
             );
             println!("  温控压力   : {therm_str}");
+            println!("  风扇       : {}", format_fan(&s.fan, lang));
             println!("  低电量模式 : {lpm_zh}");
             println!("  内建屏幕   : {disp_str}");
             println!("  熄屏守护   : {guard_zh}");
             println!("  处理器拓扑 : {topo_str}");
-            println!("  生效档位   : {} [{src_zh}] — {prof_str}", s.policy.profile);
+            println!(
+                "  生效档位   : {} [{src_zh}] — {prof_str}",
+                s.policy.profile
+            );
             println!(
                 "  调度参数   : {tp} (nice={}, 并发上限={})",
                 s.policy.nice_level, s.policy.max_jobs
@@ -336,6 +345,7 @@ fn cmd_status(args: &[String]) -> i32 {
                 format_power(&s.power_source, s.battery_pct, lang)
             );
             println!("  Thermal        : {therm_str}");
+            println!("  Fans           : {}", format_fan(&s.fan, lang));
             println!("  Low Power Mode : {lpm_en}");
             println!("  Display        : {disp_str}");
             println!("  Display Guard  : {}", s.guard_status);
@@ -415,8 +425,8 @@ fn cmd_brightness(args: &[String]) -> i32 {
 
     let data_dir = resolve_data_dir(data_dir_opt.as_deref());
     let settings = read_settings(&data_dir);
-    let lang = detect_lang(Some(&settings));
-    let probe = MacOsProbeBackend;
+    let lang = detect_lang(settings.lang.as_deref());
+    let probe = MacOsProbeBackend::default();
     let display = MacOsDisplayBackend;
 
     if subcmd == "get" {
@@ -549,7 +559,7 @@ fn cmd_lock(args: &[String]) -> i32 {
 
     let data_dir = resolve_data_dir(data_dir_opt.as_deref());
     let settings = read_settings(&data_dir);
-    let lang = detect_lang(Some(&settings));
+    let lang = detect_lang(settings.lang.as_deref());
     let display = MacOsDisplayBackend;
 
     match display.lock_screen_now() {
@@ -613,15 +623,13 @@ fn cmd_guard(args: &[String]) -> i32 {
                     return 2;
                 }
             },
-            s if s.starts_with("--interval=") => {
-                match s["--interval=".len()..].parse::<u64>() {
-                    Ok(n) if n >= 2 => interval_secs = n,
-                    _ => {
-                        eprintln!("mac-clamshell-mcp guard: --interval must be >= 2 seconds");
-                        return 2;
-                    }
+            s if s.starts_with("--interval=") => match s["--interval=".len()..].parse::<u64>() {
+                Ok(n) if n >= 2 => interval_secs = n,
+                _ => {
+                    eprintln!("mac-clamshell-mcp guard: --interval must be >= 2 seconds");
+                    return 2;
                 }
-            }
+            },
             "--bin" => match take_opt_val(args, &mut i, "--bin") {
                 Ok(v) => bin_opt = Some(PathBuf::from(v)),
                 Err(e) => {
@@ -656,7 +664,7 @@ fn cmd_guard(args: &[String]) -> i32 {
 
     let data_dir = resolve_data_dir(data_dir_opt.as_deref());
     let settings = read_settings(&data_dir);
-    let lang = detect_lang(Some(&settings));
+    let lang = detect_lang(settings.lang.as_deref());
 
     match subcmd {
         "install" => match install_launchagent(&data_dir, bin_opt.as_deref(), interval_secs) {
@@ -701,6 +709,9 @@ fn cmd_guard(args: &[String]) -> i32 {
                         serde_json::to_string_pretty(&st).unwrap_or_else(|_| "{}".into())
                     );
                 } else {
+                    if let Some(ref warning) = st.bootout_warning {
+                        eprintln!("{warning}");
+                    }
                     match lang {
                         Lang::ZhCn => println!("已卸载常驻守护 {}", st.label),
                         Lang::En => println!("Uninstalled LaunchAgent {}", st.label),
@@ -730,7 +741,11 @@ fn cmd_guard(args: &[String]) -> i32 {
                         println!("Mac Clamshell 熄屏守护状态");
                         println!(
                             "  守护开关     : {}",
-                            if st.guard_enabled { "已启用" } else { "已暂停" }
+                            if st.guard_enabled {
+                                "已启用"
+                            } else {
+                                "已暂停"
+                            }
                         );
                         println!(
                             "  LaunchAgent  : {} ({})",
@@ -751,7 +766,11 @@ fn cmd_guard(args: &[String]) -> i32 {
                         println!("Mac Clamshell Display Guard");
                         println!(
                             "  Guard Toggle : {}",
-                            if st.guard_enabled { "enabled" } else { "paused" }
+                            if st.guard_enabled {
+                                "enabled"
+                            } else {
+                                "paused"
+                            }
                         );
                         println!(
                             "  LaunchAgent  : {} ({})",
@@ -795,7 +814,8 @@ fn cmd_run(args: &[String]) -> i32 {
             },
             "--jobs" => match take_opt_val(args, &mut i, "--jobs") {
                 Ok(v) => {
-                    if v.is_empty() || v.starts_with('0') || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    if v.is_empty() || v.starts_with('0') || !v.bytes().all(|b| b.is_ascii_digit())
+                    {
                         eprintln!("mac-clamshell-mcp run: --jobs must be a positive integer");
                         return 2;
                     }

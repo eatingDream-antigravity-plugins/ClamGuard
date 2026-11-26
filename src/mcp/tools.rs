@@ -207,13 +207,13 @@ pub fn read_resource_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static
     }))
 }
 
-pub fn list_tools_json() -> Value {
-    json!({
+pub fn list_tools_json(apps_capable: bool) -> Value {
+    let mut result = json!({
         "tools": [
             {
                 "name": "clamshell_panel",
                 "title": "Mac Clamshell",
-                "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal pressure, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
+                "description": "Open the Mac Clamshell live dashboard showing macOS lid state, power/battery, thermal pressure, read-only fan telemetry, built-in display brightness, display guard status, CPU/memory load, and active throttling profile.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -237,7 +237,7 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_refresh",
                 "title": "Refresh Clamshell Telemetry",
-                "description": "Fetch fresh macOS lid, power, thermal pressure, display brightness, guard status, and policy telemetry. Pass ifHash to receive a minimal { unchanged: true } payload when state has not changed.",
+                "description": "Fetch fresh macOS lid, power, thermal pressure, fan readings, display brightness, guard status, and policy telemetry. Pass ifHash to receive a minimal { unchanged: true } payload when state has not changed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -309,7 +309,7 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_set_brightness",
                 "title": "Set Built-in Display Brightness",
-                "description": "Adjust MacBook built-in display brightness (0-100%) immediately when awake and synchronize the wake-restore target. While lid is closed, updates the saved restore target safely without lighting the closed panel. Returns an error on desktop Macs without a built-in display.",
+                "description": "Adjust MacBook built-in display brightness (0-100%) immediately when the lid is open and the display is awake. Otherwise saves the wake-restore target. Returns an error on desktop Macs without a built-in display.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -327,7 +327,7 @@ pub fn list_tools_json() -> Value {
             {
                 "name": "clamshell_lock_screen",
                 "title": "Lock Mac Screen",
-                "description": "Lock the macOS screen immediately without putting the Mac to sleep, keeping background builds and AI agents running. Uses native SACLockScreenImmediate with automatic CGSession/pmset fallback and zero Accessibility permissions.",
+                "description": "Lock the macOS screen immediately without putting the Mac to sleep, keeping background builds and AI agents running. Uses native SACLockScreenImmediate with CGSession fallback. The pmset fallback requires a verified macOS session lock.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {},
@@ -335,7 +335,13 @@ pub fn list_tools_json() -> Value {
                 }
             }
         ]
-    })
+    });
+    if !apps_capable {
+        if let Some(tools) = result["tools"].as_array_mut() {
+            tools.retain(|tool| tool["_meta"]["ui"]["visibility"] != json!(["app"]));
+        }
+    }
+    result
 }
 
 pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
@@ -437,15 +443,8 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     });
                 }
             };
-            let lid_override = std::env::var("MAC_CLAMSHELL_MOCK_LID")
-                .ok()
-                .and_then(|v| match v.trim() {
-                    "closed" => Some(true),
-                    "open" => Some(false),
-                    _ => None,
-                });
             let t0 = Instant::now();
-            match engine.set_brightness(clamped as f64, lid_override) {
+            match engine.set_brightness(clamped as f64, None) {
                 Ok(action) => {
                     if action.mode == "unavailable" {
                         return json!({
@@ -468,14 +467,12 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                         );
                     }
                     let note = match (lang, action.mode.as_str()) {
-                        (Lang::ZhCn, "saved_target") => format!(
-                            "已保存开盖恢复亮度目标: {}%",
-                            action.saved_percent
-                        ),
-                        (Lang::ZhCn, _) => format!(
-                            "内建屏幕亮度已设为 {}%",
-                            action.percent.unwrap_or(clamped)
-                        ),
+                        (Lang::ZhCn, "saved_target") => {
+                            format!("已保存开盖恢复亮度目标: {}%", action.saved_percent)
+                        }
+                        (Lang::ZhCn, _) => {
+                            format!("内建屏幕亮度已设为 {}%", action.percent.unwrap_or(clamped))
+                        }
                         (Lang::En, "saved_target") => format!(
                             "Saved lid-open restore brightness target: {}%",
                             action.saved_percent
@@ -506,9 +503,9 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             Ok((method, locked_at_ms, server_ms)) => {
                 let text = match engine.detect_lang() {
                     Lang::ZhCn => format!("已锁屏（{method}），Mac 将保持唤醒以继续运行后台任务。"),
-                    Lang::En => format!(
-                        "Screen locked ({method}); Mac remains awake for background tasks."
-                    ),
+                    Lang::En => {
+                        format!("Screen locked ({method}); Mac remains awake for background tasks.")
+                    }
                 };
                 json!({
                     "content": [{ "type": "text", "text": text }],

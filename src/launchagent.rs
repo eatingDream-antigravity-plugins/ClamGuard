@@ -1,7 +1,7 @@
-use crate::guard::DisplayGuardSummary;
-use crate::platform::macos::run_cmd_timeout;
+use crate::platform::macos::{run_cmd_exit_code, run_cmd_timeout};
 use crate::state::{
     abbreviate_home, atomic_write, ensure_private_dir, load_guard_state_opt, read_settings,
+    DisplayGuardSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,6 +21,8 @@ pub struct GuardServiceStatus {
     pub interval_secs: Option<u64>,
     pub binary_path: Option<String>,
     pub last_state: Option<DisplayGuardSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootout_warning: Option<String>,
 }
 
 pub fn launchagents_dir() -> PathBuf {
@@ -129,7 +131,9 @@ pub fn guard_service_status(data_dir: &Path) -> GuardServiceStatus {
         (None, None)
     };
     let loaded = plist_installed && is_launchctl_loaded();
-    let last_state = load_guard_state_opt(data_dir).as_ref().map(DisplayGuardSummary::from);
+    let last_state = load_guard_state_opt(data_dir)
+        .as_ref()
+        .map(DisplayGuardSummary::from);
 
     GuardServiceStatus {
         label: LAUNCHAGENT_LABEL.to_string(),
@@ -140,6 +144,7 @@ pub fn guard_service_status(data_dir: &Path) -> GuardServiceStatus {
         interval_secs,
         binary_path: binary_path.map(|p| abbreviate_home(Path::new(&p))),
         last_state,
+        bootout_warning: None,
     }
 }
 
@@ -236,7 +241,10 @@ pub fn install_launchagent(
         let (lint_ok, lint_out) = run_cmd_timeout("/usr/bin/plutil", &["-lint", &p_str], 2000);
         if !lint_ok {
             let _ = fs::remove_file(&p_path);
-            return Err(format!("generated plist failed plutil validation: {}", lint_out.trim()));
+            return Err(format!(
+                "generated plist failed plutil validation: {}",
+                lint_out.trim()
+            ));
         }
     }
 
@@ -255,7 +263,11 @@ pub fn install_launchagent(
                 p_path.display()
             ));
         }
-        let _ = run_cmd_timeout("/bin/launchctl", &["kickstart", "-k", &service_target], 2000);
+        let _ = run_cmd_timeout(
+            "/bin/launchctl",
+            &["kickstart", "-k", &service_target],
+            2000,
+        );
     }
 
     Ok(guard_service_status(data_dir))
@@ -263,13 +275,110 @@ pub fn install_launchagent(
 
 pub fn uninstall_launchagent(data_dir: &Path) -> Result<GuardServiceStatus, String> {
     let p_path = plist_path();
-    if !skip_launchctl() {
-        let service_target = format!("gui/{}/{LAUNCHAGENT_LABEL}", current_uid());
-        let _ = run_cmd_timeout("/bin/launchctl", &["bootout", &service_target], 2000);
+    let bootout_warning = if skip_launchctl() {
+        remove_plist(&p_path)?;
+        None
+    } else {
+        uninstall_verified(&p_path, current_uid(), |args, timeout| {
+            run_cmd_exit_code("/bin/launchctl", args, timeout).0
+        })?
+    };
+    let mut status = guard_service_status(data_dir);
+    status.bootout_warning = bootout_warning;
+    Ok(status)
+}
+
+fn remove_plist(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("failed to remove {}: {e}", path.display())),
     }
-    if p_path.exists() {
-        fs::remove_file(&p_path)
-            .map_err(|e| format!("failed to remove {}: {e}", p_path.display()))?;
+}
+
+fn uninstall_verified(
+    path: &Path,
+    uid: u32,
+    mut launchctl: impl FnMut(&[&str], u64) -> Option<i32>,
+) -> Result<Option<String>, String> {
+    let target = format!("gui/{uid}/{LAUNCHAGENT_LABEL}");
+    let bootout = launchctl(&["bootout", &target], 2000);
+    let removal = remove_plist(path);
+    let print = launchctl(&["print", &target], 1500);
+    let describe = |code: Option<i32>| match code {
+        Some(code) => format!("exit code {code}"),
+        None => "no exit status".to_string(),
+    };
+    let verification = match print {
+        Some(0) => Err(format!(
+            "LaunchAgent {target} is still loaded after uninstall (launchctl bootout: {})",
+            describe(bootout)
+        )),
+        // launchctl reports 113 when the specified service cannot be found.
+        Some(113) => Ok(()),
+        _ => Err(format!(
+            "could not verify that LaunchAgent {target} was unloaded (launchctl bootout: {}; launchctl print: {})",
+            describe(bootout),
+            describe(print)
+        )),
+    };
+    match (removal, verification) {
+        (Err(remove), Err(verify)) => Err(format!("{remove}. {verify}")),
+        (Err(err), _) | (_, Err(err)) => Err(err),
+        (Ok(()), Ok(())) => Ok((bootout != Some(0)).then(|| {
+            format!(
+                "launchctl bootout returned {}. launchctl print confirmed {target} is absent.",
+                describe(bootout)
+            )
+        })),
     }
-    Ok(guard_service_status(data_dir))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uninstall_verifies_launchd_even_on_bootout_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("clamshell-launchctl-test-{}", std::process::id()));
+        let plist = dir.join("agent.plist");
+        for (bootout, print) in [
+            (Some(0), Some(113)),
+            (Some(5), Some(113)),
+            (Some(5), Some(0)),
+            (Some(0), Some(0)),
+            (None, None),
+        ] {
+            atomic_write(&plist, b"plist").unwrap();
+            let mut methods = Vec::new();
+            let result = uninstall_verified(&plist, 123, |args, _| {
+                assert_eq!(args[1], format!("gui/123/{LAUNCHAGENT_LABEL}"));
+                methods.push(args[0].to_string());
+                if args[0] == "bootout" {
+                    assert!(plist.is_file());
+                    bootout
+                } else {
+                    assert!(!plist.exists(), "print must run after plist removal");
+                    print
+                }
+            });
+            assert_eq!(methods, ["bootout", "print"]);
+            match (bootout, print) {
+                (Some(0), Some(113)) => assert_eq!(result.unwrap(), None),
+                (Some(5), Some(113)) => {
+                    let warning = result.unwrap().unwrap();
+                    assert!(warning.contains("exit code 5"));
+                    assert!(warning.contains("confirmed"));
+                }
+                (_, Some(0)) => {
+                    let err = result.unwrap_err();
+                    assert!(err.contains("still loaded"));
+                    assert!(err.contains(&format!("exit code {}", bootout.unwrap())));
+                }
+                _ => assert!(result.unwrap_err().contains("could not verify")),
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

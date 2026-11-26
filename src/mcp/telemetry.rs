@@ -1,9 +1,8 @@
-use crate::guard::{
-    read_display_info, set_brightness_synced, BrightnessAction, DisplayGuardSummary, DisplayInfo,
-};
+use crate::guard::{read_display_info, set_brightness_synced, BrightnessAction, DisplayInfo};
 use crate::i18n::{detect_lang, parse_lang_tag, Lang};
 use crate::launchagent::plist_exists;
 use crate::platform::display_ffi::DisplayBackend;
+use crate::platform::fan::{FanSensorSource, FanTelemetry};
 use crate::platform::macos::{MemorySummary, ProbeBackend};
 use crate::policy::{
     build_env_vars, compute_policy, compute_profile_jobs, format_lid, format_power, format_thermal,
@@ -12,7 +11,7 @@ use crate::policy::{
 use crate::state::{
     abbreviate_home, file_fingerprint, format_iso8601_utc, guard_state_path, load_guard_state,
     load_guard_state_opt, now_epoch_ms, read_settings, settings_path, sha256_hex_16,
-    write_settings, DaemonLock, Settings, SettingsPatch,
+    write_settings, DaemonLock, DisplayGuardSummary, FileFingerprint, Settings, SettingsPatch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -67,6 +66,7 @@ pub struct TelemetrySnapshot {
     pub profile_jobs: ProfileJobs,
     pub env_vars: BTreeMap<String, String>,
     pub display: DisplayInfo,
+    pub fan: FanTelemetry,
     pub display_guard: Option<DisplayGuardSummary>,
     pub guard_status: String,
     pub degraded: bool,
@@ -118,12 +118,51 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "profileJobs": s.profile_jobs,
         "envVars": s.env_vars,
         "display": s.display,
+        "fan": {
+            "status": s.fan.status,
+            "fans": s.fan.fans,
+            "controller": s.fan.controller,
+            "externalManagers": s.fan.external_managers,
+            "ownershipMode": s.fan.ownership_mode,
+            "readOnly": s.fan.read_only,
+            "stale": s.fan.stale,
+            "note": s.fan.note,
+        },
         "displayGuard": s.display_guard,
         "guardStatus": s.guard_status,
         "degraded": s.degraded,
     });
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     sha256_hex_16(&bytes)
+}
+
+pub fn format_fan(fan: &FanTelemetry, lang: Lang) -> String {
+    let readings = match (lang, fan.status.as_str()) {
+        (Lang::ZhCn, "fanless") => "无风扇".to_string(),
+        (Lang::En, "fanless") => "fanless".to_string(),
+        (Lang::ZhCn, "unavailable") => "传感器不可用".to_string(),
+        (Lang::En, "unavailable") => "sensor unavailable".to_string(),
+        _ => fan
+            .fans
+            .iter()
+            .map(|f| {
+                let label = match (lang, f.label.as_str()) {
+                    (Lang::ZhCn, "Left") => "左侧".to_string(),
+                    (Lang::ZhCn, "Right") => "右侧".to_string(),
+                    (Lang::ZhCn, _) => format!("风扇 {}", u16::from(f.id) + 1),
+                    (Lang::En, label) => label.to_string(),
+                };
+                format!("{label} {} RPM", f.rpm)
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    match (lang, fan.ownership_mode.as_str()) {
+        (Lang::ZhCn, "yield") => format!("{readings}（只读，由 {} 控制）", fan.controller),
+        (Lang::ZhCn, _) => format!("{readings}（只读，macOS 自动控制）"),
+        (Lang::En, "yield") => format!("{readings} (read-only, yielding to {})", fan.controller),
+        (Lang::En, _) => format!("{readings} (read-only, macOS automatic control)"),
+    }
 }
 
 pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
@@ -151,7 +190,10 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                     } else {
                         String::new()
                     };
-                    format!("已合盖，恢复目标 {}%{ext}", s.display.saved_percent.unwrap_or(20))
+                    format!(
+                        "已合盖，恢复目标 {}%{ext}",
+                        s.display.saved_percent.unwrap_or(20)
+                    )
                 } else if s.display.asleep {
                     format!(
                         "已熄屏，恢复目标 {}%",
@@ -170,7 +212,7 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                 "paused" => "已暂停",
                 _ => "空闲",
             };
-            vec![
+            [
                 format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
                 format!("- 盒盖: {lid_label}，电源: {power_label}，温控: {therm_label}"),
                 format!(
@@ -186,6 +228,7 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                     s.host.memory.total_gb,
                     s.host.memory.used_pct
                 ),
+                format!("- 风扇: {}", format_fan(&s.fan, lang)),
                 format!("- 内建屏幕: {disp_desc}（守护: {guard_desc}）"),
             ]
             .join("\n")
@@ -213,7 +256,7 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
             } else {
                 "unavailable".to_string()
             };
-            vec![
+            [
                 format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
                 format!("- Lid: {lid_label}, Power: {power_label}, Thermal: {therm_label}"),
                 format!(
@@ -229,7 +272,11 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                     s.host.memory.total_gb,
                     s.host.memory.used_pct
                 ),
-                format!("- Built-in Display: {disp_desc} (guard: {})", s.guard_status),
+                format!("- Fans: {}", format_fan(&s.fan, lang)),
+                format!(
+                    "- Built-in Display: {disp_desc} (guard: {})",
+                    s.guard_status
+                ),
             ]
             .join("\n")
         }
@@ -239,13 +286,14 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
 struct CachedEntry {
     at: Instant,
     gen: u64,
-    settings_fp: Option<(u128, u64)>,
-    guard_fp: Option<(u128, u64)>,
+    settings_fp: FileFingerprint,
+    guard_fp: FileFingerprint,
     snapshot: Arc<TelemetrySnapshot>,
 }
 
 struct InFlightSlot {
     gen: u64,
+    fresh: bool,
     result: Option<Arc<TelemetrySnapshot>>,
     aborted: bool,
 }
@@ -288,6 +336,7 @@ pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
     binary_path: String,
     probe: P,
     display: D,
+    fan: Box<dyn FanSensorSource>,
     cache_ttl_ms: u64,
     settings_gen: AtomicU64,
     bg_guard_active: AtomicBool,
@@ -296,15 +345,29 @@ pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
 }
 
 impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
-    pub fn new(data_dir: PathBuf, binary_path: String, probe: P, display: D) -> Self {
-        Self::with_ttl(data_dir, binary_path, probe, display, TELEMETRY_CACHE_TTL_MS)
-    }
-
-    pub fn with_ttl(
+    pub fn new(
         data_dir: PathBuf,
         binary_path: String,
         probe: P,
         display: D,
+        fan: impl FanSensorSource + 'static,
+    ) -> Self {
+        Self::with_ttl(
+            data_dir,
+            binary_path,
+            probe,
+            display,
+            fan,
+            TELEMETRY_CACHE_TTL_MS,
+        )
+    }
+
+    fn with_ttl(
+        data_dir: PathBuf,
+        binary_path: String,
+        probe: P,
+        display: D,
+        fan: impl FanSensorSource + 'static,
         cache_ttl_ms: u64,
     ) -> Self {
         Self {
@@ -312,6 +375,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             binary_path,
             probe,
             display,
+            fan: Box::new(fan),
             cache_ttl_ms,
             settings_gen: AtomicU64::new(0),
             bg_guard_active: AtomicBool::new(false),
@@ -376,15 +440,20 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         percent: f64,
         lid_override: Option<bool>,
     ) -> Result<BrightnessAction, String> {
-        let action =
-            set_brightness_synced(&self.data_dir, percent, lid_override, &self.probe, &self.display)?;
+        let action = set_brightness_synced(
+            &self.data_dir,
+            percent,
+            lid_override,
+            &self.probe,
+            &self.display,
+        )?;
         self.invalidate_cache();
         Ok(action)
     }
 
     pub fn detect_lang(&self) -> Lang {
         let settings = read_settings(&self.data_dir);
-        detect_lang(Some(&settings))
+        detect_lang(settings.lang.as_deref())
     }
 
     pub fn lock_screen(&self) -> Result<(&'static str, u64, u64), String> {
@@ -395,7 +464,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         Ok((method, locked_at_ms, server_ms))
     }
 
-    fn disk_fingerprints(&self) -> (Option<(u128, u64)>, Option<(u128, u64)>) {
+    fn disk_fingerprints(&self) -> (FileFingerprint, FileFingerprint) {
         (
             file_fingerprint(&settings_path(&self.data_dir)),
             file_fingerprint(&guard_state_path(&self.data_dir)),
@@ -405,6 +474,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     fn run_leader(
         &self,
         req_gen: u64,
+        force: bool,
         slot: Arc<(Mutex<InFlightSlot>, Condvar)>,
     ) -> Arc<TelemetrySnapshot> {
         let mut cleanup = LeaderCleanup {
@@ -413,7 +483,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             completed: false,
         };
         let (settings_fp, guard_fp) = self.disk_fingerprints();
-        let snapshot = Arc::new(self.probe_fresh());
+        let snapshot = Arc::new(self.probe_snapshot(force));
         {
             let mut guard = lock_unpoisoned(&self.state);
             // Generation-fenced cache update: never overwrite cache if settings/brightness changed!
@@ -484,6 +554,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                     let slot = Arc::new((
                         Mutex::new(InFlightSlot {
                             gen: req_gen,
+                            fresh: force,
                             result: None,
                             aborted: false,
                         }),
@@ -497,6 +568,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                 let slot = Arc::new((
                     Mutex::new(InFlightSlot {
                         gen: req_gen,
+                        fresh: force,
                         result: None,
                         aborted: false,
                     }),
@@ -514,6 +586,11 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             while st.result.is_none() && !st.aborted {
                 st = cvar.wait(st).unwrap_or_else(|e| e.into_inner());
             }
+            if force && !st.fresh {
+                // A regular refresh may have reused per-source caches.
+                drop(st);
+                return self.collect(true);
+            }
             if let Some(ref snap) = st.result {
                 return CollectedTelemetry {
                     snapshot: Arc::clone(snap),
@@ -524,7 +601,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             }
             drop(st);
             return CollectedTelemetry {
-                snapshot: Arc::new(self.probe_fresh()),
+                snapshot: Arc::new(self.probe_snapshot(force)),
                 server_ms: t0.elapsed().as_millis() as u64,
                 from_cache: false,
                 stale: false,
@@ -532,9 +609,9 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         }
 
         let snapshot = if let Some(slot) = leader_slot {
-            self.run_leader(req_gen, slot)
+            self.run_leader(req_gen, force, slot)
         } else {
-            Arc::new(self.probe_fresh())
+            Arc::new(self.probe_snapshot(force))
         };
 
         CollectedTelemetry {
@@ -545,7 +622,11 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         }
     }
 
-    pub fn refresh_json(&self, if_hash: Option<&str>, force: bool) -> (bool, Value, Arc<TelemetrySnapshot>) {
+    pub fn refresh_json(
+        &self,
+        if_hash: Option<&str>,
+        force: bool,
+    ) -> (bool, Value, Arc<TelemetrySnapshot>) {
         let collected = self.collect(force);
         let clean_hash = if_hash.map(str::trim).unwrap_or("");
         if !clean_hash.is_empty() && clean_hash == collected.snapshot.hash {
@@ -569,21 +650,27 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         (false, val, collected.snapshot)
     }
 
-    fn probe_fresh(&self) -> TelemetrySnapshot {
+    fn probe_snapshot(&self, force: bool) -> TelemetrySnapshot {
         let settings = read_settings(&self.data_dir);
-        let lang = detect_lang(Some(&settings));
+        let lang = detect_lang(settings.lang.as_deref());
         let guard_opt = load_guard_state_opt(&self.data_dir);
-        let guard_for_disp = guard_opt.clone().unwrap_or_else(|| load_guard_state(&self.data_dir));
+        let guard_for_disp = guard_opt
+            .clone()
+            .unwrap_or_else(|| load_guard_state(&self.data_dir));
         let host_info = self.probe.static_host();
-        let hw = self.probe.probe_hardware();
+        let hw = if force {
+            self.probe.probe_hardware_fresh()
+        } else {
+            self.probe.probe_hardware()
+        };
         let display = read_display_info(&self.display, &hw.lid_state, &guard_for_disp);
         let display_guard = guard_opt.as_ref().map(DisplayGuardSummary::from);
 
         let runner_active = self.bg_guard_active.load(Ordering::SeqCst)
             || plist_exists()
             || DaemonLock::is_active(&self.data_dir);
-        let effective_thermal_cap =
-            guard_for_disp.machine.thermal_capped && !guard_for_disp.user_intent.user_override_thermal;
+        let effective_thermal_cap = guard_for_disp.machine.thermal_capped
+            && !guard_for_disp.user_intent.user_override_thermal;
         let guard_status = if !settings.guard_enabled {
             "paused"
         } else if runner_active && hw.lid_state == "closed" {
@@ -634,6 +721,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             profile_jobs,
             env_vars,
             display,
+            fan: self.fan.sample(force),
             display_guard,
             guard_status,
             degraded: hw.degraded,
@@ -651,6 +739,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::fan::TestFanSensor;
     use crate::platform::macos::{HardwareProbe, StaticHostInfo};
     use std::sync::atomic::AtomicUsize;
 
@@ -733,6 +822,48 @@ mod tests {
     }
 
     #[test]
+    fn fan_readings_change_hash_but_resampling_identical_values_does_not() {
+        struct MutableFan(Arc<Mutex<FanTelemetry>>);
+        impl FanSensorSource for MutableFan {
+            fn sample(&self, fresh: bool) -> FanTelemetry {
+                let mut fan = self.0.lock().unwrap();
+                if fresh {
+                    fan.sampled_at_ms += 1;
+                }
+                fan.clone()
+            }
+        }
+        let fan = Arc::new(Mutex::new(TestFanSensor("active:2140,2210").sample(false)));
+        let dir = std::env::temp_dir().join(format!("clamshell-fan-hash-{}", std::process::id()));
+        let engine = TelemetryEngine::new(
+            dir,
+            "mac-clamshell-mcp".into(),
+            FakeProbe {
+                delay_ms: 0,
+                calls: Arc::new(AtomicUsize::new(0)),
+                uptime: Arc::new(AtomicU64::new(3600)),
+                lid_closed: Arc::new(AtomicBool::new(false)),
+            },
+            FakeDisplay {
+                brightness: Arc::new(Mutex::new(0.7)),
+            },
+            MutableFan(Arc::clone(&fan)),
+        );
+        let initial = engine.collect(false);
+        assert_eq!(initial.snapshot.fan.fans[0].rpm, 2140);
+        let fresh = engine.collect(true);
+        assert!(fresh.snapshot.fan.sampled_at_ms > initial.snapshot.fan.sampled_at_ms);
+        assert_eq!(fresh.snapshot.hash, initial.snapshot.hash);
+
+        fan.lock().unwrap().fans[0].rpm = 2400;
+        assert!(engine.collect(false).from_cache);
+        let (unchanged, payload, snapshot) = engine.refresh_json(Some(&fresh.snapshot.hash), true);
+        assert!(!unchanged);
+        assert_ne!(fresh.snapshot.hash, snapshot.hash);
+        assert_eq!(payload["fan"]["fans"][0]["rpm"], 2400);
+    }
+
+    #[test]
     fn etag_dedup_single_flight_generation_fencing_and_bg_guard() {
         let dir =
             std::env::temp_dir().join(format!("mac-clamshell-tel-test-{}", std::process::id()));
@@ -754,6 +885,7 @@ mod tests {
             FakeDisplay {
                 brightness: Arc::clone(&bright),
             },
+            TestFanSensor("active:2140,2210"),
             2500,
         ));
         engine.set_bg_guard_active(true);
@@ -788,7 +920,7 @@ mod tests {
         assert_eq!(upd.snapshot.profile_jobs.strict, 1);
         assert_ne!(upd.snapshot.hash, h0);
 
-        // 4. External/standalone guard tick zeroes closed panel; TelemetryEngine observes disk
+        // 4. External/standalone guard records a closed lid without writing brightness; TelemetryEngine observes disk
         // fingerprint change passively without push-coupling from the guard daemon!
         lid_closed.store(true, Ordering::Relaxed);
         let ext_probe = FakeProbe {
@@ -802,7 +934,7 @@ mod tests {
         };
         let tick = crate::guard::run_guard_tick_locked(&dir, &ext_probe, &ext_disp).unwrap();
         assert!(tick.changed);
-        assert_eq!(*bright.lock().unwrap(), 0.0);
+        assert_eq!(*bright.lock().unwrap(), 0.45);
         let closed_col = engine.collect(false);
         assert!(!closed_col.from_cache);
         assert_eq!(closed_col.snapshot.guard_status, "protecting");
@@ -819,7 +951,7 @@ mod tests {
                 ..SettingsPatch::default()
             })
             .unwrap();
-        // Proof: configure() did NOT synchronously run a closed-lid guard tick to zero brightness
+        // configure() leaves the current display brightness unchanged
         assert_eq!(*bright.lock().unwrap(), 0.65);
 
         engine
