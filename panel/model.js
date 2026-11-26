@@ -19,13 +19,30 @@ export function computeOptimisticState(base, patch) {
   const s = { ...base.settings, ...patch };
   const total = Math.max(1, Number(base.cpuTopology?.total) || 8);
   const basePol = base.policy || {};
-  const autoProfile = basePol.autoProfile || "normal";
+  const thermalThrottled = ["warn", "serious", "critical"].includes(base.thermalState);
+  let autoProfile = basePol.autoProfile || "normal";
+  if (
+    patch?.acClosedProfile &&
+    !thermalThrottled &&
+    base.lidState === "closed" &&
+    base.powerSource !== "battery"
+  ) {
+    autoProfile = s.acClosedProfile === "eco" ? "eco" : "utility";
+  }
   const modeOv = s.modeOverride || "auto";
   const manual = modeOv !== "auto";
   const profile = manual ? modeOv : autoProfile;
+  const pj = base.profileJobs;
+  const tableJobs = pj
+    ? !manual && profile === "eco" && pj.autoEco != null
+      ? pj.autoEco
+      : pj[profile]
+    : null;
   const maxJobs =
     s.maxJobsOverride > 0
       ? Math.min(s.maxJobsOverride, total)
+      : tableJobs != null
+      ? tableJobs
       : profile === "strict"
       ? 1
       : profile === "normal"
