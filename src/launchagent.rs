@@ -1,4 +1,7 @@
-use crate::platform::macos::{run_cmd_exit_code, run_cmd_timeout};
+#[cfg(all(target_os = "macos", not(test)))]
+use crate::platform::macos::run_cmd_exit_code;
+#[cfg(target_os = "macos")]
+use crate::platform::macos::run_cmd_timeout;
 use crate::state::{
     abbreviate_home, atomic_write, ensure_private_dir, load_guard_state_opt, read_settings,
     DisplayGuardSummary,
@@ -101,6 +104,7 @@ fn skip_launchctl() -> bool {
         || !cfg!(target_os = "macos")
 }
 
+#[cfg(all(target_os = "macos", not(test)))]
 fn current_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
@@ -115,9 +119,16 @@ fn is_launchctl_loaded() -> bool {
     if skip_launchctl() {
         return plist_exists();
     }
-    let target = format!("gui/{}/{LAUNCHAGENT_LABEL}", current_uid());
-    let (ok, _) = run_cmd_timeout("/bin/launchctl", &["print", &target], 1500);
-    ok
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        let target = format!("gui/{}/{LAUNCHAGENT_LABEL}", current_uid());
+        let (ok, _) = run_cmd_timeout("/bin/launchctl", &["print", &target], 1500);
+        ok
+    }
+    #[cfg(any(not(target_os = "macos"), test))]
+    {
+        false
+    }
 }
 
 pub fn is_launchagent_active() -> bool {
@@ -227,6 +238,11 @@ pub fn install_launchagent(
     if interval_secs < 2 {
         return Err("--interval must be >= 2 seconds".to_string());
     }
+    #[cfg(test)]
+    if !skip_launchctl() {
+        let _ = (data_dir, bin_override);
+        return Err("refusing live launchctl install under #[cfg(test)]".to_string());
+    }
     let bin_path = resolve_guard_binary(bin_override)?;
     ensure_private_dir(data_dir).map_err(|e| format!("failed to create data dir: {e}"))?;
     let log_dir = data_dir.join("logs");
@@ -254,6 +270,7 @@ pub fn install_launchagent(
         }
     }
 
+    #[cfg(all(target_os = "macos", not(test)))]
     if !skip_launchctl() {
         let uid = current_uid();
         let gui_domain = format!("gui/{uid}");
@@ -280,14 +297,26 @@ pub fn install_launchagent(
 }
 
 pub fn uninstall_launchagent(data_dir: &Path) -> Result<GuardServiceStatus, String> {
+    #[cfg(test)]
+    if !skip_launchctl() {
+        let _ = data_dir;
+        return Err("refusing live launchctl uninstall under #[cfg(test)]".to_string());
+    }
     let p_path = plist_path();
     let bootout_warning = if skip_launchctl() {
         remove_plist(&p_path)?;
         None
     } else {
-        uninstall_verified(&p_path, current_uid(), |args, timeout| {
-            run_cmd_exit_code("/bin/launchctl", args, timeout).0
-        })?
+        #[cfg(all(target_os = "macos", not(test)))]
+        {
+            uninstall_verified(&p_path, current_uid(), |args, timeout| {
+                run_cmd_exit_code("/bin/launchctl", args, timeout).0
+            })?
+        }
+        #[cfg(any(not(target_os = "macos"), test))]
+        {
+            return Err("refusing live launchctl uninstall under #[cfg(test)]".to_string());
+        }
     };
     let mut status = guard_service_status(data_dir);
     status.bootout_warning = bootout_warning;
@@ -386,5 +415,17 @@ mod tests {
             }
         }
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn install_and_uninstall_refuse_live_launchctl_under_cfg_test() {
+        let dir =
+            std::env::temp_dir().join(format!("clamshell-launchctl-guard-{}", std::process::id()));
+        if !skip_launchctl() {
+            let install_err = install_launchagent(&dir, None, 10).unwrap_err();
+            assert!(install_err.contains("#[cfg(test)]"));
+            let uninstall_err = uninstall_launchagent(&dir).unwrap_err();
+            assert!(uninstall_err.contains("#[cfg(test)]"));
+        }
     }
 }

@@ -90,6 +90,7 @@ pub struct UnchangedPayload {
     pub timestamp: String,
     pub server_ms: u64,
     pub from_cache: bool,
+    pub stale: bool,
 }
 
 pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
@@ -677,6 +678,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
                 timestamp: collected.snapshot.timestamp.clone(),
                 server_ms: collected.server_ms,
                 from_cache: collected.from_cache,
+                stale: collected.stale,
             })
             .unwrap_or_else(|_| json!({ "unchanged": true }));
             return (true, payload, collected.snapshot);
@@ -687,6 +689,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             obj.insert("unchanged".into(), json!(false));
             obj.insert("serverMs".into(), json!(collected.server_ms));
             obj.insert("fromCache".into(), json!(collected.from_cache));
+            obj.insert("stale".into(), json!(collected.stale));
         }
         (false, val, collected.snapshot)
     }

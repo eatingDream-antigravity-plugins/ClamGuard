@@ -11,10 +11,13 @@ Contributions to [mac-clamshell-mcp](https://github.com/eatingDream-antigravity-
 ## Local checks before pushing
 
 ```bash
+(cd panel && npm ci --ignore-scripts)
 node panel/pack.mjs
 node --test panel/test/panel.test.mjs
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 bash scripts/check_sanitized.sh
 ```
 
-Release binaries should be built with `RUSTFLAGS="--remap-path-prefix=$HOME=/build" cargo build --release --locked` so local paths are not embedded.
+Release binaries should be built with `RUSTFLAGS="--remap-path-prefix=$HOME=/build --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$PWD=/src" cargo build --release --locked` so local paths are not embedded.

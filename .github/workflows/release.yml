@@ -31,7 +31,6 @@ jobs:
       contents: write
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Validate tag format
         run: |
@@ -46,6 +45,8 @@ jobs:
       - name: Sanitization guard
         run: bash scripts/check_sanitized.sh
       - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             ver="${TAG#v}"
@@ -60,15 +61,14 @@ jobs:
             gh release create "$TAG" --title "$TAG" "${extra[@]}" "${notes[@]}"
           fi
 
-  package-macos:
-    name: Build & upload macOS tarballs (arm64 + x86_64)
+  build-macos:
+    name: Build & verify macOS tarballs (arm64 + x86_64)
     needs: ensure-release
     runs-on: macos-15-intel
     permissions:
-      contents: write
+      contents: read
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -84,24 +84,38 @@ jobs:
           key: macos-universal
       - name: Build & test panel HTML
         run: |
-          (cd panel && npm install --no-audit --no-fund)
+          (cd panel && npm ci --ignore-scripts)
           node panel/pack.mjs
           node --test panel/test/panel.test.mjs
-      - name: Run Rust tests
-        run: cargo test --locked
-      - name: Build, verify, package, and upload macOS tarballs
+      - name: Run Rust checks & tests
         run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build, verify, and stage macOS tarballs
+        run: |
+          OUT="${RUNNER_TEMP}/artifacts-macos"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+          CARGO_DIR="${CARGO_HOME:-$HOME/.cargo}"
+          REMAP_FLAGS="--remap-path-prefix=${HOME}=/build --remap-path-prefix=${CARGO_DIR}=/cargo --remap-path-prefix=${PWD}=/src"
+          for reg_dir in "${CARGO_DIR}"/registry/src/*; do
+            if [ -d "$reg_dir" ]; then
+              REMAP_FLAGS="${REMAP_FLAGS} --remap-path-prefix=${reg_dir}=/cargo/registry/src"
+            fi
+          done
           for TARGET in aarch64-apple-darwin x86_64-apple-darwin; do
             echo "=== Building ${TARGET} ==="
-            RUSTFLAGS="--remap-path-prefix=${HOME}=/build" cargo build --release --locked --target "${TARGET}"
+            RUSTFLAGS="${REMAP_FLAGS}" cargo build --release --locked --target "${TARGET}"
             bin="target/${TARGET}/release/mac-clamshell-mcp"
-            if strings "$bin" | grep -F "${HOME}" >/dev/null 2>&1; then
-              echo "error: runner HOME path leaked into release binary (${TARGET})" >&2
+            if strings "$bin" | grep -E '(/Users/|/home/)' >/dev/null 2>&1 \
+              || strings "$bin" | grep -F -e "${PWD}" -e "${HOME}" >/dev/null 2>&1; then
+              echo "error: local path leaked into release binary (${TARGET})" >&2
               exit 1
             fi
             ARCHIVE="mac-clamshell-mcp-${TAG}-${TARGET}.tar.gz"
             STAGE="$(mktemp -d)"
-            mkdir -p "$STAGE/bin" "$STAGE/scripts" "$STAGE/panel/dist" "$STAGE/rules" "$STAGE/skills/mac-clamshell" "$STAGE/assets"
+            mkdir -p "$STAGE/bin" "$STAGE/scripts" "$STAGE/panel/dist" "$STAGE/rules" "$STAGE/skills/mac-clamshell" "$STAGE/assets" "$STAGE/docs"
             install -m 0755 "$bin" "$STAGE/bin/mac-clamshell-mcp"
             install -m 0755 scripts/install-launchagent.sh "$STAGE/scripts/install-launchagent.sh"
             cp panel/dist/panel.html "$STAGE/panel/dist/panel.html"
@@ -111,12 +125,37 @@ jobs:
             cp plugin/rules/AGENTS.md "$STAGE/rules/AGENTS.md"
             cp skills/mac-clamshell/SKILL.md "$STAGE/skills/mac-clamshell/SKILL.md"
             cp assets/logo.svg "$STAGE/assets/logo.svg"
+            cp docs/ai-guide.md "$STAGE/docs/ai-guide.md"
+            cp llms.txt "$STAGE/llms.txt"
             cp LICENSE "$STAGE/LICENSE"
             cp README.md "$STAGE/README.md"
             cp README.zh-CN.md "$STAGE/README.zh-CN.md"
-            COPYFILE_DISABLE=1 tar -czf "$ARCHIVE" -C "$STAGE" .
-            shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256"
-            cat "${ARCHIVE}.sha256"
+            COPYFILE_DISABLE=1 tar -czf "${OUT}/${ARCHIVE}" -C "$STAGE" .
+            (cd "$OUT" && shasum -a 256 "$ARCHIVE" > "${ARCHIVE}.sha256" && cat "${ARCHIVE}.sha256")
             rm -rf "$STAGE"
-            gh release upload "$TAG" "$ARCHIVE" "${ARCHIVE}.sha256" --clobber
           done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dist-macos
+          path: ${{ runner.temp }}/artifacts-macos/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Upload GitHub Release assets
+    needs: [ensure-release, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: dist-macos
+          path: dist-artifacts
+      - name: Verify checksums
+        run: (cd dist-artifacts && sha256sum -c ./*.sha256)
+      - name: Upload release tarballs and checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release upload "$TAG" -R "$REPO" dist-artifacts/*.tar.gz dist-artifacts/*.tar.gz.sha256 --clobber

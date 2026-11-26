@@ -1,6 +1,6 @@
 {
   "name": "mac-clamshell-panel",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +8,6 @@
     "test": "node --test test/panel.test.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "0.25.12"
   }
 }
