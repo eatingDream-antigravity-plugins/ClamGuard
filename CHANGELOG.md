@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.4.3...v1.5.0) (2026-11-27)
+
+
+### Features
+
+* Lucid Indigo 64 KiB TS panel, fail-closed settings hot-reload, lid/hook fixes, and hot-reload installer ([#28](https://github.com/eatingDream-antigravity-plugins/clam-guard/issues/28)) ([4b4b5f4](https://github.com/eatingDream-antigravity-plugins/clam-guard/commit/4b4b5f49699e38f7bc63b02094cee754ae0fd08b))
+
 ## [1.4.3](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.4.2...v1.4.3) (2026-11-27)
 
 
