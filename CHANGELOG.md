@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.3](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.4.2...v1.4.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* align Clam Guard branding, kebab-case URLs, and CI/README polish ([#26](https://github.com/eatingDream-antigravity-plugins/clam-guard/issues/26)) ([d712a56](https://github.com/eatingDream-antigravity-plugins/clam-guard/commit/d712a561875eaa6fa36bcb5ee6b6a27f2196a4ee))
+
 ## [1.4.2](https://github.com/eatingDream-antigravity-plugins/mac-clamshell-mcp/compare/v1.4.1...v1.4.2) (2026-11-26)
 
 
