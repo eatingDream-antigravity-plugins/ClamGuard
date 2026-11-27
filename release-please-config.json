@@ -16,6 +16,16 @@
       "jsonpath": "$.version"
     },
     {
+      "type": "json",
+      "path": "panel/package-lock.json",
+      "jsonpath": "$.version"
+    },
+    {
+      "type": "json",
+      "path": "panel/package-lock.json",
+      "jsonpath": "$.packages[''].version"
+    },
+    {
       "type": "generic",
       "path": "panel/template.html"
     },
