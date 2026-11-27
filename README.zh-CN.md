@@ -19,9 +19,9 @@ Clam Guard 能在你合上 MacBook 机盖时保持系统唤醒且内屏熄灭，
 <br>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/clamguard-dashboard-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/images/clamguard-dashboard-light.png">
-  <img src="docs/images/clamguard-dashboard-dark.png" alt="Clam Guard 实时控制面板截图，展示开合盖状态、供电与温控、内屏亮度控制、限流档位及只读风扇信息" width="640">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/clamguard-dashboard-dark-zh.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/clamguard-dashboard-light-zh.png">
+  <img src="docs/images/clamguard-dashboard-dark-zh.png" alt="Clam Guard 实时控制面板截图，展示开合盖状态、供电与温控、内屏亮度控制、限流档位及只读风扇信息" width="640">
 </picture>
 
 </div>
