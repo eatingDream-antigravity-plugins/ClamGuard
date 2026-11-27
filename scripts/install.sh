@@ -3,7 +3,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall
-#   ./scripts/install.sh [--version v1.0.0] [--dest /path/to/plugin-dir] [--uninstall]
+#   ./scripts/install.sh [--version v1.0.0] [--dest /path/to/plugin-dir] [--reload] [--no-reload] [--uninstall]
 
 set -eu
 
@@ -11,6 +11,8 @@ REPO="eatingDream-antigravity-plugins/clam-guard"
 VERSION="${MAC_CLAMSHELL_VERSION:-}"
 DEST="${ANTIGRAVITY_PLUGINS_DIR:-${HOME}/.gemini/config/plugins}/mac-clamshell-mcp"
 UNINSTALL=0
+DO_RELOAD=0
+NO_RELOAD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -30,12 +32,20 @@ while [ $# -gt 0 ]; do
       DEST="$2"
       shift 2
       ;;
+    --reload)
+      DO_RELOAD=1
+      shift
+      ;;
+    --no-reload)
+      NO_RELOAD=1
+      shift
+      ;;
     --uninstall)
       UNINSTALL=1
       shift
       ;;
     -h|--help)
-      printf 'Usage: %s [--version vX.Y.Z] [--dest DIR] [--uninstall]\n' "$0"
+      printf 'Usage: %s [--version vX.Y.Z] [--dest DIR] [--reload] [--no-reload] [--uninstall]\n' "$0"
       printf 'Env:   MAC_CLAMSHELL_VERSION, ANTIGRAVITY_PLUGINS_DIR\n'
       exit 0
       ;;
@@ -183,6 +193,34 @@ cp "${STAGE}/assets/logo.svg" "${DEST}/assets/logo.svg"
 [ -f "${STAGE}/README.md" ] && cp "${STAGE}/README.md" "${DEST}/README.md"
 [ -f "${STAGE}/README.zh-CN.md" ] && cp "${STAGE}/README.zh-CN.md" "${DEST}/README.zh-CN.md"
 
-printf 'Installed Mac Clamshell MCP %s (%s) to %s\n' "$VERSION" "$TARGET" "$DEST"
+reload_antigravity_mcp() {
+  if [ "$NO_RELOAD" -eq 1 ]; then
+    return 0
+  fi
+  if [ -n "${ANTIGRAVITY_CSRF_TOKEN:-}" ]; then
+    ls_addr="${ANTIGRAVITY_LS_ADDRESS:-localhost:5387}"
+    if curl -sf -H "Content-Type: application/json" \
+      -H "x-codeium-csrf-token: ${ANTIGRAVITY_CSRF_TOKEN}" \
+      -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
+      "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
+      printf 'Refreshed live Antigravity MCP server (close & reopen any open Clam Guard panel tab).\n'
+    else
+      printf 'Note: could not reach Antigravity RefreshMcpServers; restart Clam Guard in Customizations > Installed.\n'
+    fi
+  elif [ "$DO_RELOAD" -eq 1 ]; then
+    if command -v agy >/dev/null 2>&1; then
+      agy plugin disable mac-clamshell-mcp >/dev/null 2>&1 || true
+      agy plugin enable mac-clamshell-mcp >/dev/null 2>&1 || true
+      printf 'Reloaded Antigravity plugin mac-clamshell-mcp via agy CLI.\n'
+    else
+      printf 'Note: agy CLI not found on PATH; reload in Antigravity Customizations > Installed > Clam Guard > MCP > Restart.\n'
+    fi
+  else
+    printf 'Next: run "agy plugin disable mac-clamshell-mcp && agy plugin enable mac-clamshell-mcp" or restart in Antigravity Customizations > Installed.\n'
+  fi
+}
+
+printf 'Installed Clam Guard %s (%s) to %s\n' "$VERSION" "$TARGET" "$DEST"
+reload_antigravity_mcp
 printf 'Verify: %s/bin/mac-clamshell-mcp status\n' "$DEST"
 printf 'Optional 24/7 standalone LaunchAgent: %s/bin/mac-clamshell-mcp guard install\n' "$DEST"

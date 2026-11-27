@@ -4,15 +4,17 @@
 
 # Clam Guard (`mac-clamshell-mcp`)
 
-**Keep your closed MacBook cool, quiet, and safe while builds or AI coding agents run in the background.**
+**Run agents with the lid closed, without cooking your Mac.**
+
+Clam Guard keeps a MacBook awake with the screen dark when you close the lid, and eases off heavy work as it heats up. It reads fans and temperature but never takes over fan control.
 
 [Homepage](https://clamguard.eatingdream.dev) · **English** | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases)
-![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
-![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/license-MIT-1A1916)](LICENSE)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-12151E?logo=rust&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-12151E?logo=apple&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-12151E)](LICENSE)
 
 <br>
 
@@ -42,9 +44,9 @@
 | Profile | Trigger | Effect |
 | :--- | :--- | :--- |
 | **Normal** | Lid open & cool | Full speed, no throttling |
-| **Utility** | Lid closed on AC | Utility QoS (`nice 10`), E-core job cap (`2–4`) |
-| **Eco** | Lid closed on battery | Background QoS (`nice 15`), max `2` jobs (`1` at `<=20%`) |
-| **Strict** | Serious / critical thermal | Lowest priority (`taskpolicy -b`, `nice 19`), `1` job |
+| **Cool** (`utility`) | Lid closed on AC | Lower priority (`nice 10`), E-core job cap (`2–4`) |
+| **Eco** | Lid closed on battery | Background priority (`nice 15`), max `2` jobs (`1` at `<=20%`) |
+| **Strict** | Serious / critical heat | Lowest priority (`taskpolicy -b`, `nice 19`), `1` job |
 
 ## Quick Start
 
@@ -52,7 +54,7 @@
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
 ```
 
-<sub>Verifies the release archive SHA-256 automatically · Supports macOS (Apple Silicon & Intel) · Pin a tag with `MAC_CLAMSHELL_VERSION=vX.Y.Z` · Remove cleanly anytime with `curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall`.</sub>
+<sub>Verifies the release archive SHA-256 automatically · Refreshes live Antigravity MCP servers via `RefreshMcpServers` automatically (use `--reload` outside Antigravity or `--no-reload` to skip) · Supports macOS (Apple Silicon & Intel) · Pin a tag with `MAC_CLAMSHELL_VERSION=vX.Y.Z` · Remove cleanly anytime with `curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall`.</sub>
 
 Reload Antigravity to open **Clam Guard**, or run directly in your terminal:
 
@@ -86,7 +88,7 @@ npx skills add eatingDream-antigravity-plugins/clam-guard
 
 ## Antigravity Plugin Suite
 
-Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) (`context-radar-mcp`) · **Clam Guard** (`mac-clamshell-mcp`) · [Remote Cast](https://github.com/eatingDream-antigravity-plugins/remote-cast) (`chrome-stream-mcp`) · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) (`colab-mcp`) — powered by [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit) (`agy-mcp-kit`).
+Part of the [Antigravity Plugins](https://github.com/eatingDream-antigravity-plugins) suite: [Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) · **Clam Guard** · [Remote Cast](https://github.com/eatingDream-antigravity-plugins/remote-cast) · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) · [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit)
 
 ## License
 

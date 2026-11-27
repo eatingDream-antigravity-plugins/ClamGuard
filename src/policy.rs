@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 
 pub use crate::platform::macos::CpuTopology;
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Policy {
@@ -14,6 +18,8 @@ pub struct Policy {
     pub max_jobs: u32,
     pub taskpolicy: String,
     pub nice_level: i32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub jobs_overridden: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +124,8 @@ pub fn compute_policy(
     let (profile, mut max_jobs, taskpolicy, nice_level) =
         apply_profile_defaults(requested, topo, battery_pct, respect_low_batt);
 
-    if settings.max_jobs_override > 0 {
+    let jobs_overridden = settings.max_jobs_override > 0;
+    if jobs_overridden {
         max_jobs = settings.max_jobs_override.min(topo.total.max(1));
     }
 
@@ -129,12 +136,13 @@ pub fn compute_policy(
         max_jobs,
         taskpolicy,
         nice_level,
+        jobs_overridden,
     }
 }
 
 pub fn build_env_vars(policy: &Policy) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    if policy.profile == "normal" {
+    if policy.profile == "normal" && !policy.jobs_overridden {
         return map;
     }
     let j = policy.max_jobs.to_string();
@@ -223,6 +231,19 @@ pub fn format_topology_compact(topo: &CpuTopology) -> String {
     }
 }
 
+pub fn format_profile_name(profile: &str, lang: Lang) -> &'static str {
+    match (lang, profile) {
+        (Lang::ZhCn, "strict") => "严格",
+        (Lang::ZhCn, "eco") => "节能",
+        (Lang::ZhCn, "utility") => "控温",
+        (Lang::ZhCn, _) => "正常",
+        (Lang::En, "strict") => "Strict",
+        (Lang::En, "eco") => "Eco",
+        (Lang::En, "utility") => "Cool",
+        (Lang::En, _) => "Normal",
+    }
+}
+
 pub fn format_thermal(
     thermal_state: &str,
     thermal_pressure: &str,
@@ -231,86 +252,66 @@ pub fn format_thermal(
 ) -> String {
     let p_str = match (lang, thermal_pressure) {
         (Lang::ZhCn, "unknown") => "未知",
-        (Lang::ZhCn, "nominal") => "正常 (nominal)",
-        (Lang::ZhCn, "fair") => "轻度温升 (fair)",
-        (Lang::ZhCn, "serious") => "偏高降频 (serious)",
-        (Lang::ZhCn, "critical") => "严重过热 (critical)",
+        (Lang::ZhCn, "nominal") => "正常",
+        (Lang::ZhCn, "fair") => "偏热",
+        (Lang::ZhCn, "serious") => "过热降频",
+        (Lang::ZhCn, "critical") => "严重过热",
         (Lang::ZhCn, _) => {
             if thermal_state == "warn" {
-                "温控告警"
+                "过热降频"
             } else {
-                "温度正常"
+                "正常"
             }
         }
-        (Lang::En, "nominal") => "nominal",
-        (Lang::En, "fair") => "fair",
-        (Lang::En, "serious") => "serious (throttling)",
-        (Lang::En, "critical") => "critical (throttling)",
-        (Lang::En, _) => thermal_state,
+        (Lang::En, "unknown") => "unknown",
+        (Lang::En, "nominal") => "Normal",
+        (Lang::En, "fair") => "Warm",
+        (Lang::En, "serious") => "Hot, slowing down",
+        (Lang::En, "critical") => "Critical, slowing down",
+        (Lang::En, _) => {
+            if thermal_state == "warn" {
+                "Hot, slowing down"
+            } else if thermal_state == "unknown" {
+                "unknown"
+            } else {
+                "Normal"
+            }
+        }
     };
-    match cpu_speed_limit_pct {
-        Some(pct) => format!("{p_str}, CPU_Speed_Limit={pct}%"),
-        None => p_str.to_string(),
+    match (lang, cpu_speed_limit_pct) {
+        (Lang::ZhCn, Some(pct)) => format!("{p_str} · CPU 限速 {pct}%"),
+        (Lang::En, Some(pct)) => format!("{p_str} · CPU capped at {pct}%"),
+        (_, None) => p_str.to_string(),
     }
 }
 
 pub fn format_profile(policy: &Policy, topo: &CpuTopology, lang: Lang) -> String {
     let hetero = topo.is_heterogeneous();
     match (lang, policy.profile.as_str(), hetero) {
-        (Lang::ZhCn, "strict", true) => "强限保护模式（E-Core + I/O 限流，单并发）".to_string(),
-        (Lang::ZhCn, "strict", false) => {
-            "强限保护模式（Background QoS + nice + I/O 限流，单并发）".to_string()
-        }
+        (Lang::ZhCn, "strict", true) => "严格：仅用能效核，一次 1 个任务".to_string(),
+        (Lang::ZhCn, "strict", false) => "严格：后台优先级，一次 1 个任务".to_string(),
         (Lang::ZhCn, "eco", true) => {
-            format!("合盖节能模式（严格 E-Core，最高 {} 并发）", policy.max_jobs)
+            format!("节能：仅用能效核，最多 {} 个任务", policy.max_jobs)
         }
         (Lang::ZhCn, "eco", false) => {
-            format!(
-                "合盖节能模式（Background QoS + nice，最高 {} 并发）",
-                policy.max_jobs
-            )
+            format!("节能：后台优先级，最多 {} 个任务", policy.max_jobs)
         }
-        (Lang::ZhCn, "utility", true) => {
-            format!("合盖控温模式（Utility QoS，最高 {} 并发）", policy.max_jobs)
+        (Lang::ZhCn, "utility", _) => {
+            format!("控温：降低优先级，最多 {} 个任务", policy.max_jobs)
         }
-        (Lang::ZhCn, "utility", false) => {
-            format!(
-                "合盖控温模式（Utility QoS + nice，最高 {} 并发）",
-                policy.max_jobs
-            )
-        }
-        (Lang::ZhCn, _, _) => format!("正常性能模式（{} 并发）", policy.max_jobs),
-        (Lang::En, "strict", true) => {
-            "Strict thermal protection (E-Core + I/O throttle, 1 job)".to_string()
-        }
-        (Lang::En, "strict", false) => {
-            "Strict thermal protection (Background QoS + nice + I/O throttle, 1 job)".to_string()
-        }
+        (Lang::ZhCn, _, _) => format!("正常：最多 {} 个任务", policy.max_jobs),
+        (Lang::En, "strict", true) => "Strict: efficiency cores, 1 job at a time".to_string(),
+        (Lang::En, "strict", false) => "Strict: background priority, 1 job at a time".to_string(),
         (Lang::En, "eco", true) => {
-            format!(
-                "Eco clamshell mode (E-Core pinned, up to {} jobs)",
-                policy.max_jobs
-            )
+            format!("Eco: efficiency cores, up to {} jobs", policy.max_jobs)
         }
         (Lang::En, "eco", false) => {
-            format!(
-                "Eco clamshell mode (Background QoS + nice, up to {} jobs)",
-                policy.max_jobs
-            )
+            format!("Eco: background priority, up to {} jobs", policy.max_jobs)
         }
-        (Lang::En, "utility", true) => {
-            format!(
-                "Utility clamshell mode (Utility QoS, up to {} jobs)",
-                policy.max_jobs
-            )
+        (Lang::En, "utility", _) => {
+            format!("Cool: lower priority, up to {} jobs", policy.max_jobs)
         }
-        (Lang::En, "utility", false) => {
-            format!(
-                "Utility clamshell mode (Utility QoS + nice, up to {} jobs)",
-                policy.max_jobs
-            )
-        }
-        (Lang::En, _, _) => format!("Normal performance (up to {} jobs)", policy.max_jobs),
+        (Lang::En, _, _) => format!("Normal: up to {} jobs", policy.max_jobs),
     }
 }
 
@@ -378,7 +379,7 @@ mod tests {
 
         let p_intel_eco = compute_policy("closed", "battery", Some(85), "ok", &intel, &def);
         let desc_en = format_profile(&p_intel_eco, &intel, Lang::En);
-        assert!(desc_en.contains("Background QoS + nice"));
+        assert!(desc_en.contains("background priority"));
         assert!(!desc_en.contains("E-Core"));
 
         // Serious / critical thermal pressure -> strict regardless of lid open
@@ -390,7 +391,7 @@ mod tests {
             assert_eq!(p.nice_level, 19);
         }
 
-        // Manual override + clamped maxJobsOverride
+        // Manual override + clamped maxJobsOverride (enforces concurrency env vars even in Normal mode)
         let manual = Settings {
             mode_override: "normal".into(),
             max_jobs_override: 64,
@@ -402,6 +403,24 @@ mod tests {
         assert_eq!(p.auto_profile, "strict");
         assert_eq!(p.mode_source, "manual");
         assert_eq!(p.max_jobs, 8);
-        assert!(build_env_vars(&p).is_empty());
+        assert!(p.jobs_overridden);
+        let manual_envs = build_env_vars(&p);
+        assert_eq!(
+            manual_envs.get("MAKEFLAGS").map(String::as_str),
+            Some("-j8")
+        );
+        assert_eq!(
+            manual_envs.get("CARGO_BUILD_JOBS").map(String::as_str),
+            Some("8")
+        );
+
+        let normal_unthrottled = Settings {
+            mode_override: "normal".into(),
+            max_jobs_override: 0,
+            ..Settings::default()
+        };
+        let p_free = compute_policy("open", "ac", Some(100), "ok", &topo, &normal_unthrottled);
+        assert!(!p_free.jobs_overridden);
+        assert!(build_env_vars(&p_free).is_empty());
     }
 }

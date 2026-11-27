@@ -1037,10 +1037,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(desktop_err["result"]["isError"], true);
+        assert_eq!(
+            desktop_err["result"]["structuredContent"]["errorKind"],
+            "no_builtin_display"
+        );
         assert!(desktop_err["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("亮度调节失败"));
+            .contains("没有内建屏幕"));
 
         let missing_pct_err = handle_rpc_value_with_session(
             &json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"clamshell_set_brightness","arguments":{}}}),
@@ -1050,10 +1054,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(missing_pct_err["result"]["isError"], true);
+        assert_eq!(
+            missing_pct_err["result"]["structuredContent"]["errorKind"],
+            "invalid_brightness"
+        );
         assert!(missing_pct_err["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("percent 必须是"));
+            .contains("亮度需在 0 到 100 之间"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

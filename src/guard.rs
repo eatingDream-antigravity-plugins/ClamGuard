@@ -3,7 +3,7 @@ use crate::platform::display_ffi::{
 };
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::state::{
-    load_guard_state, now_epoch_secs, read_settings, save_guard_state, DaemonLock, FileLock,
+    load_guard_state, now_epoch_secs, save_guard_state, try_read_settings, DaemonLock, FileLock,
     GuardState,
 };
 use serde::{Deserialize, Serialize};
@@ -295,9 +295,10 @@ pub fn evaluate_guard_tick_plan(
                 .map(|level| ((level as f64) * 1000.0).round() / 1000.0);
             if let Some(saved) = pre_cap_restore.or(visible_brightness) {
                 next.user_intent.saved_brightness = saved;
-                // Retry once the display wakes after guard-triggered sleep or a thermal cap.
-                next.machine.needs_restore |= externals.is_empty() || pre_cap_restore.is_some();
             }
+            // Retry restore once the display wakes after undocked clamshell close or a thermal cap,
+            // even if macOS already dimmed/slept the internal panel before this tick ran.
+            next.machine.needs_restore |= externals.is_empty() || pre_cap_restore.is_some();
         }
 
         let mut sleep_display = false;
@@ -312,6 +313,7 @@ pub fn evaluate_guard_tick_plan(
             if should_sleep {
                 sleep_display = true;
                 next.machine.last_sleep_ts = now;
+                next.machine.needs_restore = true;
             }
         }
 
@@ -634,15 +636,17 @@ pub fn run_guard_tick_locked(
     probe: &dyn ProbeBackend,
     display: &dyn DisplayBackend,
 ) -> Result<GuardTickOutcome, String> {
-    let settings = read_settings(data_dir);
-    if !settings.guard_enabled {
-        return Ok(GuardTickOutcome {
-            paused: true,
-            changed: false,
-            fast_poll: false,
-            open_restoring: false,
-        });
-    }
+    let settings = match try_read_settings(data_dir) {
+        Ok(s) if s.guard_enabled => s,
+        _ => {
+            return Ok(GuardTickOutcome {
+                paused: true,
+                changed: false,
+                fast_poll: false,
+                open_restoring: false,
+            });
+        }
+    };
     let (plan, now) = {
         let Ok(Some(_lock)) = FileLock::acquire(data_dir, false) else {
             return Ok(GuardTickOutcome {
@@ -1059,12 +1063,12 @@ mod tests {
         assert!((st_synced.user_intent.saved_brightness - 0.50).abs() < 0.005);
 
         // 8. If macOS already slept/zeroed display BEFORE our closed tick, saved 0.50 is preserved
-        // and still restored when the screen wakes black, OR macOS's own visible wake is preserved.
+        // and needs_restore is armed when undocked so a low/black wake still restores 0.50.
         *disp.asleep.lock().unwrap() = Some(true);
         *disp.brightness.lock().unwrap() = Some(0.0);
         let (st_pre_slept, _) = evaluate_guard_tick(Some(true), &st_synced, 140.0, &disp);
         assert!((st_pre_slept.user_intent.saved_brightness - 0.50).abs() < 0.005);
-        assert!(!st_pre_slept.machine.needs_restore);
+        assert!(st_pre_slept.machine.needs_restore);
 
         *disp.asleep.lock().unwrap() = Some(false);
         *disp.brightness.lock().unwrap() = Some(0.0);
@@ -1430,6 +1434,50 @@ mod tests {
         assert!(!asleep_closed.internal_offline);
         assert!(asleep_closed.confirmed_asleep);
         assert!(asleep_closed.asleep);
+
+        // P0: closed-lid wake-restore still runs even if macOS dimmed/slept the panel before guard tick
+        let dimmed_disp = MockDisplay::new(0.0, true);
+        let mut pre_state = GuardState::default();
+        pre_state.user_intent.saved_brightness = 0.72;
+        let (closed_tick, changed_closed) =
+            evaluate_guard_tick(Some(true), &pre_state, 200.0, &dimmed_disp);
+        assert!(changed_closed);
+        assert!(closed_tick.machine.needs_restore);
+        assert!((closed_tick.user_intent.saved_brightness - 0.72).abs() < 0.001);
+        *dimmed_disp.asleep.lock().unwrap() = Some(false);
+        *dimmed_disp.brightness.lock().unwrap() = Some(0.05);
+        let (opened_tick, _) = evaluate_guard_tick(Some(false), &closed_tick, 205.0, &dimmed_disp);
+        assert!(!opened_tick.machine.needs_restore);
+        assert!((dimmed_disp.brightness.lock().unwrap().unwrap() - 0.72).abs() < 0.005);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_guard_tick_locked_fails_closed_on_corrupt_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "mac-clamshell-guard-fail-closed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::state::ensure_private_dir(&dir).unwrap();
+        let settings_file = crate::state::settings_path(&dir);
+
+        for bad_raw in [
+            r#"{"guardEnabled": false, broken"#,
+            "[1, 2]",
+            r#"{"guardEnabled": "false"}"#,
+        ] {
+            std::fs::write(&settings_file, bad_raw).unwrap();
+            let disp = MockDisplay::new(0.6, false);
+            let out = run_guard_tick_locked(&dir, &LidProbe(|| Some(true)), &disp).unwrap();
+            assert!(out.paused);
+            assert!(!out.changed);
+            assert!(!out.fast_poll);
+            assert!(!out.open_restoring);
+            assert!(disp.writes.lock().unwrap().is_empty());
+            assert_eq!(*disp.sleeps.lock().unwrap(), 0);
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

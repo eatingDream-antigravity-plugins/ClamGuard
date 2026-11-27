@@ -64,11 +64,11 @@ Note on `--lid-state`: `--lid-state closed` forces a safe deferred write (`saved
 
 ## Build From Source
 
-Requires macOS, Rust (`cargo`), and Node.js 20+:
+Requires macOS, Rust (`cargo`), and Node.js 22.18+:
 
 ```sh
 git clone https://github.com/eatingDream-antigravity-plugins/clam-guard.git
 cd clam-guard
-(cd panel && npm ci --ignore-scripts) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
+(cd panel && npm ci --ignore-scripts) && npm --prefix panel run typecheck && npm --prefix panel run build && npm --prefix panel test
 cargo test --locked && ./scripts/install-plugin.sh
 ```

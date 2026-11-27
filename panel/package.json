@@ -3,11 +3,17 @@
   "version": "1.4.3",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
-    "build": "node pack.mjs",
-    "test": "node --test test/panel.test.mjs"
+    "typecheck": "tsc --noEmit",
+    "build": "node pack.ts",
+    "test": "node --test test/panel.test.ts"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "@types/node": "26.6.11",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
   }
 }

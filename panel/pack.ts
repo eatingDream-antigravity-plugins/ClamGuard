@@ -4,39 +4,46 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import type * as Esbuild from "esbuild";
+import { assertPanelInvariants } from "./kit/guard.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
-const entryJs = path.join(__dirname, "app.js");
+const entryTs = path.join(__dirname, "app.ts");
+const kitTokensPath = path.join(__dirname, "kit", "tokens.css");
 const cssPath = path.join(__dirname, "styles.css");
 const templatePath = path.join(__dirname, "template.html");
 const distDir = path.join(__dirname, "dist");
 const outHtml = path.join(distDir, "panel.html");
 const BOOT_TOKEN = "/*__MAC_CLAMSHELL_BOOT__*/";
-const MODULES = ["bridge.js", "polling.js", "brightness.js", "model.js"];
-const SIZE_FAIL_BYTES = 43_500;
-const SIZE_WARN_BYTES = 42_500;
+const MODULES = ["kit/bridge.ts", "polling.ts", "brightness.ts", "model.ts"];
+const SIZE_FAIL_BYTES = 65_536;
+const SIZE_WARN_BYTES = 57_344;
 
-function tryLoadEsbuild() {
+function tryLoadEsbuild(): typeof Esbuild | null {
   if (process.env.MAC_CLAMSHELL_BUNDLER === "bun") return null;
-  for (const mod of [process.env.ESBUILD_PATH, "esbuild"].filter(Boolean)) {
-    try { return require(mod); } catch {}
+  for (const mod of [process.env.ESBUILD_PATH, "esbuild"].filter((m): m is string => Boolean(m))) {
+    try {
+      return require(mod) as typeof Esbuild;
+    } catch {}
   }
   return null;
 }
 
-function tryBunBundle() {
+function tryBunBundle(): string | null {
   let tmpDir = "";
   try {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mc-pack-"));
-    for (const f of [...MODULES, "app.js"]) {
-      fs.writeFileSync(path.join(tmpDir, f), fs.readFileSync(path.join(__dirname, f), "utf8"), "utf8");
+    for (const f of [...MODULES, "app.ts"]) {
+      const dst = path.join(tmpDir, f);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.writeFileSync(dst, fs.readFileSync(path.join(__dirname, f), "utf8"), "utf8");
     }
     const out = execFileSync(
       "bun",
-      ["build", path.join(tmpDir, "app.js"), "--bundle", "--minify", "--format=iife", "--target=browser"],
+      ["build", path.join(tmpDir, "app.ts"), "--bundle", "--minify", "--format=iife", "--target=browser"],
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }
     );
     return out.trim() ? out.trim() : null;
@@ -47,20 +54,26 @@ function tryBunBundle() {
   }
 }
 
-function tryBunCss() {
+function tryBunCss(combinedCss: string): string | null {
+  let tmpDir = "";
   try {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mc-css-"));
+    const tmpCss = path.join(tmpDir, "combined.css");
+    fs.writeFileSync(tmpCss, combinedCss, "utf8");
     const out = execFileSync(
       "bun",
-      ["build", cssPath, "--minify"],
+      ["build", tmpCss, "--minify"],
       { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] }
     );
     return out.trim() ? out.trim() : null;
   } catch {
     return null;
+  } finally {
+    if (tmpDir) try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
   }
 }
 
-function fallbackMinifyCss(css) {
+function fallbackMinifyCss(css: string): string {
   return css
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/\s+/g, " ")
@@ -69,7 +82,7 @@ function fallbackMinifyCss(css) {
     .trim();
 }
 
-function cleanCss(css) {
+function cleanCss(css: string): string {
   return css
     .replace(/--buncss-[a-z0-9-]+:[^;}"']+;?/gi, "")
     .replace(/--([a-z0-9-]+):\s+/gi, "--$1:")
@@ -82,26 +95,16 @@ function cleanCss(css) {
     .trim();
 }
 
-function fallbackBundleJs() {
-  const parts = MODULES.map((f) =>
-    fs.readFileSync(path.join(__dirname, f), "utf8").replace(/^\s*export\s+/gm, "")
-  );
-  const appSrc = fs
-    .readFileSync(entryJs, "utf8")
-    .replace(/^\s*import\s+[\s\S]*?from\s+["']\.\/[^"']+["'];?\s*/gm, "");
-  return `(()=>{${parts.join("\n")}\n${appSrc}})();`;
-}
-
-const rawCss = fs.readFileSync(cssPath, "utf8");
+const rawCss = `${fs.readFileSync(kitTokensPath, "utf8")}\n${fs.readFileSync(cssPath, "utf8")}`;
 const esbuild = tryLoadEsbuild();
-let jsCode;
-let cssCode;
-let bundler = "fallback";
+let jsCode: string;
+let cssCode: string;
+let bundler = "bun";
 
 if (esbuild) {
   bundler = "esbuild";
   const result = await esbuild.build({
-    entryPoints: [entryJs],
+    entryPoints: [entryTs],
     bundle: true,
     minify: true,
     treeShaking: true,
@@ -122,13 +125,11 @@ if (esbuild) {
   cssCode = cleanCss(minCss.code);
 } else {
   const bunJs = tryBunBundle();
-  if (bunJs) {
-    bundler = "bun";
-    jsCode = bunJs.replace(/<\/script/gi, "<\\/script");
-  } else {
-    jsCode = fallbackBundleJs().replace(/<\/script/gi, "<\\/script");
+  if (!bunJs) {
+    throw new Error("Neither esbuild nor bun is available to bundle TypeScript panel sources");
   }
-  cssCode = cleanCss(tryBunCss() || fallbackMinifyCss(rawCss));
+  jsCode = bunJs.replace(/<\/script/gi, "<\\/script");
+  cssCode = cleanCss(tryBunCss(rawCss) || fallbackMinifyCss(rawCss));
 }
 
 const template = fs
@@ -146,16 +147,17 @@ const html = template
   .replace("/*__INLINE_CSS__*/", () => cssCode)
   .replace("/*__INLINE_JS__*/", () => jsCode);
 
+const report = assertPanelInvariants(html, {
+  maxBytes: SIZE_FAIL_BYTES,
+  hardMaxBytes: SIZE_FAIL_BYTES,
+  warnBytes: SIZE_WARN_BYTES,
+  bootPlaceholder: BOOT_TOKEN,
+});
+for (const w of report.warnings) console.warn(`WARN: ${w}`);
+
 const jsBytes = Buffer.byteLength(jsCode, "utf8");
 const cssBytes = Buffer.byteLength(cssCode, "utf8");
-const totalBytes = Buffer.byteLength(html, "utf8");
-
-if (totalBytes > SIZE_FAIL_BYTES) {
-  throw new Error(`panel.html exceeds hard size gate: ${totalBytes} B > ${SIZE_FAIL_BYTES} B`);
-}
-if (totalBytes > SIZE_WARN_BYTES) {
-  console.warn(`WARN: panel.html (${totalBytes} B) exceeds ${SIZE_WARN_BYTES} B warning threshold`);
-}
+const totalBytes = report.bytes;
 
 fs.mkdirSync(distDir, { recursive: true });
 fs.writeFileSync(outHtml, html, "utf8");

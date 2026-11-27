@@ -42,6 +42,7 @@ fn mock_command(dir: &std::path::Path, app: &str) -> Command {
         .env("MAC_CLAMSHELL_MOCK_THERM", "ok")
         .env("MAC_CLAMSHELL_MOCK_DISPLAY", "builtin")
         .env("MAC_CLAMSHELL_MOCK_FAN", "fanless")
+        .env("MAC_CLAMSHELL_MOCK_HOST", "1")
         .env("MAC_CLAMSHELL_LANG", "en");
     command
 }
@@ -473,11 +474,12 @@ fn mcp_and_cli_require_verified_session_lock_after_display_sleep() {
             assert!(v["error"].as_str().unwrap().contains(message));
             assert!(v.get("locked_at_ms").is_none());
             assert_eq!(res["isError"], true);
-            assert!(res.get("structuredContent").is_none());
-            assert!(res["content"][0]["text"]
+            assert_eq!(res["structuredContent"]["errorKind"], "lock_failed");
+            assert!(res["structuredContent"]["errorDetail"]
                 .as_str()
                 .unwrap()
                 .contains(message));
+            assert_eq!(res["content"][0]["text"], "Couldn't lock the screen.");
         }
     }
     fs::remove_dir_all(dir).unwrap();

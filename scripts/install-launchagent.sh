@@ -1,5 +1,5 @@
 #!/bin/sh
-# Install and load the Mac Clamshell MCP LaunchAgent (`dev.mac-clamshell-mcp.display-guard`).
+# Install and load the Clam Guard (`mac-clamshell-mcp`) LaunchAgent (`dev.mac-clamshell-mcp.display-guard`).
 # Usage: ./scripts/install-launchagent.sh [--bin /path/to/mac-clamshell-mcp] [--data-dir /path/to/data] [--interval 10]
 
 set -eu

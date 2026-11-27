@@ -877,7 +877,14 @@ fn native_thermal_pressure() -> Option<&'static str> {
     None
 }
 
+fn mock_host_enabled() -> bool {
+    std::env::var("MAC_CLAMSHELL_MOCK_HOST").ok().as_deref() == Some("1")
+}
+
 fn probe_low_power() -> Option<String> {
+    if mock_host_enabled() {
+        return Some("0".to_string());
+    }
     let (ok, out) = probe_pmset(&["-g"])?;
     ok.then(|| parse_low_power_mode(&out))
 }
@@ -1029,11 +1036,24 @@ impl MacOsProbeBackend {
             || low_power_mode == "unknown";
 
         #[cfg(target_os = "macos")]
-        let (memory, load_avg, uptime_seconds) = (
-            native::memory_summary(),
-            native::load_avg(),
-            native::uptime_seconds(),
-        );
+        let (memory, load_avg, uptime_seconds) = if mock_host_enabled() {
+            (
+                MemorySummary {
+                    total_gb: 32.0,
+                    used_gb: 14.4,
+                    compressed_gb: 1.2,
+                    used_pct: 45,
+                },
+                [1.2, 1.05, 0.95],
+                7200,
+            )
+        } else {
+            (
+                native::memory_summary(),
+                native::load_avg(),
+                native::uptime_seconds(),
+            )
+        };
         #[cfg(not(target_os = "macos"))]
         let (memory, load_avg, uptime_seconds) = (
             MemorySummary {
