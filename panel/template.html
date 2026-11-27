@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" style="background:#141311;color-scheme:dark">
+<html lang="en" style="background:#0B0D12;color-scheme:dark">
 <head>
 <meta charset="utf-8">
 <meta name="app-version" content="1.4.3"><!-- x-release-please-version -->
@@ -9,73 +9,78 @@
 <title>Clam Guard</title>
 <style>/*__INLINE_CSS__*/</style>
 </head>
-<body style="background:#141311">
+<body style="background:#0B0D12">
 <div id=app>
 <div id=shell class="c sh">
 <header class="hd">
 <div class=em><svg viewBox="0 0 16 16"><path d="M3 4.5h10v6H3zM1.5 12.5h13"/></svg><span id=hd class=dt></span></div>
 <span class=wm>Clam Guard</span>
-<span id=hs class="sb el"></span>
-<div id=fb class=md><span id=fb-p class=fb hidden><span id=fb-d class=fd hidden></span><span id=fb-t class=el></span><button id=fb-r class=rb data-a=retry hidden></button></span></div>
-<div class=hc>
+<span id=hs class="sb m el"></span>
+<div id=fb class=md><span id=fb-p class=fb hidden><span id=fb-d class=fd hidden></span><span id=fb-t class=el></span><button id=fb-det class=rb data-a=fb-det hidden></button><button id=fb-r class=rb data-a=retry hidden></button></span></div>
+<div class="f g6">
 <button id=auto-chip class="ch mn ns" data-a=auto><span class=cd></span><span id=auto-lbl></span></button>
-<div id=lang-grp class="lg ns" role=group><button data-lg=en>EN</button><button data-lg=zh-CN>中文</button></div>
-<button id=refresh-btn class=ib data-a=refresh><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg></button>
+<div id=lang-grp class="lg ns"><button data-lg=en>EN</button><button data-lg=zh-CN>中文</button></div>
+<button id=cfg-btn class="b i" data-a=cfg aria-expanded=false><svg viewBox="0 0 16 16"><path d="M2 4h2.5M7.5 4H14M2 8h6.5M11.5 8H14M2 12h2.5M7.5 12H14"/><circle cx=6 cy=4 r=1.5 /><circle cx=10 cy=8 r=1.5 /><circle cx=6 cy=12 r=1.5 /></svg></button>
+<button id=refresh-btn class="b i" data-a=refresh><svg viewBox="0 0 16 16"><path d="M14 8a6 6 0 1 1-1.8-4.2M14 2v4h-4"/></svg></button>
 </div>
 </header>
 <div id=swp class=sp hidden><div class=si></div></div>
-<div id="bnr" class=bn role=status hidden><span id=bnr-t class=el></span><div class=ba><button id=bnr-act class="bt sm" data-a=bnr-retry hidden></button><button id=bnr-x class=bx data-a=bnr-dismiss>×</button></div></div>
+<div id="bnr" class=bn role=status hidden><span id=bnr-t class=el></span><div class="f g6"><button id=bnr-det class="b s" data-a=bnr-det hidden></button><button id=bnr-act class="b s" data-a=bnr-retry hidden></button><button id=bnr-x class="b x" data-a=bnr-dismiss>×</button></div></div>
+<section id=cfg-drawer class="c card cfg" hidden>
+<div class=r><div class="f lb"><span id=ch></span><span id=co class=bg data-k=ok hidden></span></div><button id=cx class="b x" data-a=cx>×</button></div>
+<div id=ce class=bn data-k=wn hidden><span id=cet></span></div>
+<div id=cr class="c bt1 g8"></div>
+<div class="r co m"><span class="mn el"><span id=cf></span> <span id=cp></span></span><button id=cb class="b s" data-a=cp></button></div>
+</section>
 <div class=gd>
 <section class="card hero fl"><div class=hg>
-<div><div id=k0></div><div class=hv><span id=h-lid-d></span><span id=h-lid>-</span></div></div>
-<div><div id=k1></div><div class=hv><span id=h-pwr-d></span><span id=h-pwr class=mn>-</span></div><div id=hbb class=mb hidden><div id=hbf class=mf></div></div></div>
-<div><div id=k2></div><div class=hv><span id=h-thm-d></span><span id=h-thm>-</span></div></div>
-<div><div id=k3></div><div class=hv><span id=h-grd-d></span><span id=h-grd>-</span></div></div>
+<div><div id=k0 class=kl></div><div class=hv><span id=h-lid-d></span><span id=h-lid>-</span></div></div>
+<div><div id=k1 class=kl></div><div class=hv><span id=h-pwr-d></span><span id=h-pwr class=mn>-</span></div><div id=hbb class=mb hidden><div id=hbf class=mf></div></div></div>
+<div><div id=k2 class=kl></div><div class=hv><span id=h-thm-d></span><span id=h-thm>-</span></div></div>
+<div><div id=k3 class=kl></div><div class=hv><span id=h-grd-d></span><span id=h-grd>-</span></div></div>
 </div></section>
 <section class="c card">
 <div class=r><div class="f lb"><span id=k4></span><span id=bt class=bg hidden></span></div><span id=bv class="hn mn">-</span></div>
-<div class="f bs">
-<button class="ib ns" data-bs=-5 aria-label="-5%">−</button>
-<div id=bright-track class="pt ns" role=slider aria-labelledby=k4 tabindex=0 aria-valuemin=0 aria-valuemax=100><div class=pr><div class=pf></div></div><div class=ph></div></div>
-<button class="ib ns" data-bs=5 aria-label="+5%">+</button>
+<div class="f g8">
+<button class="b i ns" data-bs=-5 aria-label="-5%">−</button>
+<div id=bright-track class=ns role=slider aria-labelledby=k4 tabindex=0 aria-valuemin=0 aria-valuemax=100><div class=pr><div class=pf></div></div><div class=ph></div></div>
+<button class="b i ns" data-bs=5 aria-label="+5%">+</button>
 </div>
 <div id=prs-grp class=ps role=radiogroup></div>
-<div id=bc class=cp hidden></div>
-<div class="r gr">
-<div class="f gf"><div class="c gk"><span id=k5></span><span id=gs class=gs></span></div><button id=guard-btn class="sw ns" role=switch data-a=guard aria-labelledby=k5><span class=sk></span></button></div>
-<button id="lock-btn" class="bt lk ns" data-a=lock><svg viewBox="0 0 24 24"><rect x=4 y=11 width=16 height=10 rx=2 /><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><span id=k6></span></button>
+<div id=bc class=m hidden></div>
+<div class="r bt1">
+<div class="f gf"><div class=c><span id=k5></span><span id=gs class=m></span></div><button id=guard-btn class=ns role=switch data-a=guard aria-labelledby=k5><span class=sk></span></button></div>
+<button id="lock-btn" class="b lk ns" data-a=lock><svg viewBox="0 0 16 16"><rect x=3 y=7.5 width=10 height=6.5 rx=1.5 /><path d="M5.5 7.5V5a2.5 2.5 0 0 1 5 0v2.5"/></svg><span id=k6></span></button>
 </div>
 </section>
 <section class="c card">
 <div class=r><div class="f lb"><span id=k7></span></div><span id=mb class=bg hidden></span></div>
 <div id=mode-rail class=sr role=radiogroup><div class=th></div></div>
-<div class="r sr2">
-<div class="f sk2"><span id=k8></span><button id=ar class="bt sm" data-a=jauto hidden></button></div>
-<div class="f sc" role=group><button id=jd class="ib ns" data-js=-1>−</button><span id=sv class="sv mn"></span><button id=ji class="ib ns" data-js=1>+</button></div>
+<div class="r bt1">
+<div class="f g8"><span id=k8></span><button id=ar class="b s" data-a=jauto hidden></button></div>
+<div class="f g4"><button id=jd class="b i ns" data-js=-1>−</button><span id=sv class="sv mn"></span><button id=ji class="b i ns" data-js=1>+</button></div>
 </div>
 </section>
 <section id="fan-card" class="c card fl">
-<div class=r><div class="f lb m0"><svg class=fg viewBox="0 0 24 24"><circle cx=12 cy=12 r=2 /><path d="M12 10c0-4 3-6 5-4s0 4-3 5m2 1c4 0 6 3 4 5s-4 0-5-3m-1 2c0 4-3 6-5 4s0-4 3-5m-2-1c-4 0-6-3-4-5s4 0 5 3"/></svg><span id=k9></span><span id=frpm class="fr mn el">-</span></div><span id=fth class=bg></span></div>
-<div id=frow2 class="r fr2"><div class="f fl2 m0"><span id=ka class=kl></span><span id=fctrl class=el>-</span></div><span id=fown class=bg></span></div>
-<div id=fcap class=cp></div>
+<div class=r><div class="f lb m0"><svg class=fg viewBox="0 0 16 16"><circle cx=8 cy=8 r=1.4 /><path d="M8 6.5c0-2.5 2-4 3.2-2.6s0 2.6-2 3.3m1.3.8c2.5 0 4 2 2.6 3.2s-2.6 0-3.3-2m-.8 1.3c0 2.5-2 4-3.2 2.6s0-2.6 2-3.3m-1.3-.8c-2.5 0-4-2-2.6-3.2s2.6 0 3.3 2"/></svg><span id=k9></span><span id=frpm class="fr mn el">-</span></div><span id=fth class=bg></span></div>
+<div id=frow2 class="r bt1"><div class="f g8 m0"><span id=ka class=kl></span><span id=fctrl class=el>-</span></div><span id=fown class=bg></span></div>
+<div id=fcap class=m></div>
 </section>
-<details id=diag-tray class="tr fl">
-<summary class="r ts ns"><span class="f sl m0"><span id=kb class=st></span><span id=tp class="pv el mn"></span></span><svg class=ci viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></summary>
+<details id=diag-tray class=fl>
+<summary class="r ns"><span class="f g8 m0"><span id=kb class=st></span><span id=tp class="pv m el mn"></span></span><svg class=ci viewBox="0 0 16 16"><path d="m6 12 4-4-4-4"/></svg></summary>
 <div class=tb>
 <div class=tp>
-<div class=c><div id=kc class=kl></div><div class="cv mn"><span id=dmu>-</span><span id=dmt class=cu></span></div><div class=mb><div id=dmf class=mf></div></div><div id=dc class=cs></div></div>
-<div class=c><div id=kd class=kl></div><div id=dld class="cv mn">-</div><div id=dsp class="cs mn"></div><div id=ds class=cs></div><div id=dlm class=cs></div></div>
+<div class=c><div id=kc class=kl></div><div class="cv mn"><span id=dmu>-</span><span id=dmt class=m2></span></div><div class=mb><div id=dmf class=mf></div></div><div id=dc class=m2></div></div>
+<div class=c><div id=kd class=kl></div><div id=dld class="cv mn">-</div><div id=dsp class="m2 mn"></div><div id=ds class=m2></div><div id=dlm class=m2></div></div>
 </div>
-<div class="c tc">
-<div class="r ac"><span id=ke></span><div id=ac-grp class=ss role=radiogroup></div></div>
-<div id=de class=ev></div>
-</div>
-<footer class="r co"><span id=dh class="mn el"><span id=dhi></span> · <span id=ht></span></span><span id=ft class=mn></span></footer>
+<div class="c tc"><div id=de class=ev></div></div>
+<footer class="r co m"><span id=dh class="mn el"><span id=dhi></span> · <span id=ht></span></span><span id=ft class=mn></span></footer>
 </div>
 </details>
 </div>
 </div>
-<div id=emp class="c card ep ew" hidden><div class="em ee"><svg width=18 height=18 viewBox="0 0 16 16"><path d="M3 4.5h10v6H3zM1.5 12.5h13"/></svg><span class=dt></span></div><div id=emp-msg class=em2></div><button id=emp-btn class=bs2 data-a=refresh hidden></button></div>
+<div id=emp class="c card ep ew" hidden><div class="em ee"><svg viewBox="0 0 16 16"><path d="M3 4.5h10v6H3zM1.5 12.5h13"/></svg><span class=dt></span></div><div id=emp-msg class=m2></div><div class="f g6"><button id=emp-btn class="b cta" data-a=refresh hidden></button><button id=emp-det class="b s" data-a=emp-det hidden></button></div></div>
+<div id=raw class="raw mn" hidden></div>
 </div>
 <script>/*__MAC_CLAMSHELL_BOOT__*//*__INLINE_JS__*/</script>
 </body>

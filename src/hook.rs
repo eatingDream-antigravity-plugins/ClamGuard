@@ -1,8 +1,8 @@
 use crate::i18n::{detect_lang, Lang};
 use crate::platform::macos::{MacOsProbeBackend, ProbeBackend};
 use crate::policy::{
-    compute_policy, format_lid, format_power, format_profile, format_thermal,
-    format_topology_compact, policy_settings_signature, state_signature,
+    compute_policy, format_profile_name, format_topology_compact, policy_settings_signature,
+    state_signature,
 };
 use crate::state::{atomic_write, ensure_private_dir, read_settings, settings_path, sha256_hex_16};
 use serde_json::{json, Value};
@@ -223,15 +223,7 @@ pub fn evaluate_hook<P: ProbeBackend>(
         return json!({});
     }
 
-    let lid_loc = format_lid(&hw.lid_state, lang);
-    let power_loc = format_power(&hw.power_source, hw.battery_pct, lang);
-    let profile_loc = format_profile(&policy, &host.cpu_topology, lang);
-    let therm_loc = format_thermal(
-        &hw.thermal_state,
-        &hw.thermal_pressure,
-        hw.cpu_speed_limit_pct,
-        lang,
-    );
+    let prev_was_closed = prev_sig.split('|').next() == Some("closed");
     let batt_suffix = hw
         .battery_pct
         .map(|p| format!(" ({p}%)"))
@@ -244,27 +236,38 @@ pub fn evaluate_hook<P: ProbeBackend>(
         None => format!("{} (pressure={})", hw.thermal_state, hw.thermal_pressure),
     };
     let topo_compact = format_topology_compact(&host.cpu_topology);
+    let prof_name = format_profile_name(&policy.profile, lang);
+    let jobs_en = if policy.max_jobs == 1 {
+        "1 job".to_string()
+    } else {
+        format!("up to {} jobs", policy.max_jobs)
+    };
 
     let (sys_msg, user_md) = if policy.profile == "normal" {
         let msg = format!(
             "[mac-clamshell] Live status update: lid={}, power={}{}, thermal={}, source={}. Throttling is now LIFTED (profile=normal, max_jobs={}). Normal execution speed and concurrency may resume.",
             hw.lid_state, hw.power_source, batt_suffix, sys_therm, policy.mode_source, policy.max_jobs
         );
-        let md = match (lang, policy.mode_source.as_str()) {
-            (Lang::ZhCn, "manual") => format!(
-                "> **Mac Clamshell**: 已**手动切换**至正常性能模式（当前{lid_loc}，{power_loc}，最高 {} 并发）。",
-                policy.max_jobs
-            ),
-            (Lang::ZhCn, _) => format!(
-                "> **Mac Clamshell**: 检测到已**{lid_loc}**（{power_loc}，温控 {therm_loc}）— 已自动恢复正常性能。"
-            ),
-            (Lang::En, "manual") => format!(
-                "> **Mac Clamshell**: Manually switched to **Normal** performance mode (lid {lid_loc}, {power_loc}, up to {} jobs).",
-                policy.max_jobs
-            ),
-            (Lang::En, _) => format!(
-                "> **Mac Clamshell**: **Lid {lid_loc}** ({power_loc}, thermal {therm_loc}) — full performance restored."
-            ),
+        let md = match (
+            lang,
+            policy.mode_source.as_str(),
+            prev_was_closed,
+            hw.lid_state.as_str(),
+        ) {
+            (Lang::ZhCn, "manual", _, _) => {
+                "> **Clam Guard** · 已手动切回**正常**模式。".to_string()
+            }
+            (Lang::En, "manual", _, _) => {
+                "> **Clam Guard** · Switched to **Normal** (manual).".to_string()
+            }
+            (Lang::ZhCn, _, true, "open") => "> **Clam Guard** · 已开盖，恢复全速。".to_string(),
+            (Lang::En, _, true, "open") => {
+                "> **Clam Guard** · Lid open · back to full speed.".to_string()
+            }
+            (Lang::ZhCn, _, _, _) => "> **Clam Guard** · 已降温，恢复全速。".to_string(),
+            (Lang::En, _, _, _) => {
+                "> **Clam Guard** · Cooled down · back to full speed.".to_string()
+            }
         };
         (msg, md)
     } else {
@@ -282,26 +285,40 @@ pub fn evaluate_hook<P: ProbeBackend>(
             policy.nice_level,
             policy.max_jobs
         );
-        let md = match lang {
-            Lang::ZhCn => {
-                let src_zh = if policy.mode_source == "manual" {
-                    "手动锁定"
-                } else {
-                    "自动识别"
-                };
-                format!(
-                    "> **Mac Clamshell**（{src_zh}）: 当前**{lid_loc}运行**（{power_loc}，温控 {therm_loc}）— 已启用 **{profile_loc}**。"
-                )
+        let is_manual = policy.mode_source == "manual";
+        let md = match (lang, hw.lid_state.as_str(), is_manual) {
+            (Lang::ZhCn, "closed", true) => format!(
+                "> **Clam Guard** · 已合盖 · 手动开启**{prof_name}**（最多 {} 个任务）。",
+                policy.max_jobs
+            ),
+            (Lang::ZhCn, "closed", false) => format!(
+                "> **Clam Guard** · 已合盖 · 已切到**{prof_name}**（最多 {} 个任务）。",
+                policy.max_jobs
+            ),
+            (Lang::ZhCn, "open", true) => {
+                format!("> **Clam Guard** · 已开盖 · 手动开启**{prof_name}**。")
             }
-            Lang::En => {
-                let src_en = if policy.mode_source == "manual" {
-                    "manual"
-                } else {
-                    "auto"
-                };
-                format!(
-                    "> **Mac Clamshell** ({src_en}): **Lid {lid_loc}** ({power_loc}, thermal {therm_loc}) — **{profile_loc}** active."
-                )
+            (Lang::ZhCn, _, true) => format!(
+                "> **Clam Guard** · 手动开启**{prof_name}**（最多 {} 个任务）。",
+                policy.max_jobs
+            ),
+            (Lang::ZhCn, _, false) => {
+                format!("> **Clam Guard** · 温度偏高，已切到**{prof_name}**。")
+            }
+            (Lang::En, "closed", true) => {
+                format!("> **Clam Guard** · Lid closed · **{prof_name}** on (manual, {jobs_en}).")
+            }
+            (Lang::En, "closed", false) => {
+                format!("> **Clam Guard** · Lid closed · **{prof_name}** on ({jobs_en}).")
+            }
+            (Lang::En, "open", true) => {
+                format!("> **Clam Guard** · Lid open · **{prof_name}** on (manual).")
+            }
+            (Lang::En, _, true) => {
+                format!("> **Clam Guard** · **{prof_name}** on (manual, {jobs_en}).")
+            }
+            (Lang::En, _, false) => {
+                format!("> **Clam Guard** · Running hot · **{prof_name}** on.")
             }
         };
         (msg, md)
@@ -562,7 +579,7 @@ mod tests {
             r3["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
                 .as_str()
                 .unwrap()
-                .contains("强限保护模式")
+                .contains("已合盖 · 手动开启**严格**")
         );
 
         // 4. Fresh SessionStart under normal emits {}
@@ -589,6 +606,61 @@ mod tests {
             now,
         );
         assert_eq!(r4, json!({}));
+
+        // 5. Desktop (lid=unknown) & open-lid manual banners never say "合盖" / "Lid closed"
+        let desktop_hot = StubProbe::new("unknown", "ac");
+        write_settings(
+            &dir,
+            &SettingsPatch {
+                mode_override: Some("strict".into()),
+                lang: Some("zh-CN".into()),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        let r_desk = evaluate_hook(
+            Some("session-start"),
+            HookInput {
+                conversation_id: "c-desk".into(),
+                hook_event_name: "SessionStart".into(),
+            },
+            &dir,
+            "mac-clamshell-mcp",
+            &desktop_hot,
+            60,
+            now,
+        );
+        let md_desk = r_desk["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            .as_str()
+            .unwrap();
+        assert!(!md_desk.contains("合盖"));
+        assert!(md_desk.contains("手动开启**严格**"));
+
+        write_settings(
+            &dir,
+            &SettingsPatch {
+                mode_override: Some("eco".into()),
+                lang: Some("en".into()),
+                ..SettingsPatch::default()
+            },
+        )
+        .unwrap();
+        let r_open_man = evaluate_hook(
+            Some("session-start"),
+            HookInput {
+                conversation_id: "c-open".into(),
+                hook_event_name: "SessionStart".into(),
+            },
+            &dir,
+            "mac-clamshell-mcp",
+            &open,
+            60,
+            now,
+        );
+        let md_open = r_open_man["injectSteps"][0]["systemMessage"]["metadata"]["user_markdown"]
+            .as_str()
+            .unwrap();
+        assert!(md_open.contains("Lid open · **Eco** on (manual)."));
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -12,8 +12,9 @@ Contributions to [Clam Guard (mac-clamshell-mcp)](https://github.com/eatingDream
 
 ```bash
 (cd panel && npm ci --ignore-scripts)
-node panel/pack.mjs
-node --test panel/test/panel.test.mjs
+npm --prefix panel run typecheck
+npm --prefix panel run build
+npm --prefix panel test
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked

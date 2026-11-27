@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{self, DirBuilder, File, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -103,7 +103,7 @@ pub fn daemon_lock_path(data_dir: &Path) -> PathBuf {
     data_dir.join("display-guard-daemon.lock")
 }
 
-pub type FileFingerprint = Option<(u128, u64)>;
+pub type FileFingerprint = Option<(u128, u64, u64)>;
 
 pub fn file_fingerprint(path: &Path) -> FileFingerprint {
     let meta = fs::metadata(path).ok()?;
@@ -113,7 +113,7 @@ pub fn file_fingerprint(path: &Path) -> FileFingerprint {
         .duration_since(UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    Some((mtime_ns, meta.len()))
+    Some((mtime_ns, meta.len(), meta.ino()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +131,10 @@ pub struct Settings {
     pub thermal_bright_cap_pct: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
+    #[serde(default)]
+    pub poll_interval_sec: u32,
+    #[serde(default)]
+    pub bg_poll_interval_sec: i32,
 }
 
 fn default_mode_override() -> String {
@@ -154,6 +158,8 @@ impl Default for Settings {
             guard_enabled: true,
             thermal_bright_cap_pct: 0,
             lang: None,
+            poll_interval_sec: 0,
+            bg_poll_interval_sec: 0,
         }
     }
 }
@@ -167,6 +173,8 @@ pub struct SettingsPatch {
     pub guard_enabled: Option<bool>,
     pub thermal_bright_cap_pct: Option<i64>,
     pub lang: Option<String>,
+    pub poll_interval_sec: Option<i64>,
+    pub bg_poll_interval_sec: Option<i64>,
 }
 
 impl SettingsPatch {
@@ -215,58 +223,162 @@ impl SettingsPatch {
                 ));
             }
         }
+        if let Some(p) = self.poll_interval_sec {
+            if !(0..=300).contains(&p) {
+                return Err(format!(
+                    "invalid pollIntervalSec {p}; expected integer in 0..=300"
+                ));
+            }
+        }
+        if let Some(bp) = self.bg_poll_interval_sec {
+            if !(-1..=3600).contains(&bp) {
+                return Err(format!(
+                    "invalid bgPollIntervalSec {bp}; expected integer in -1..=3600"
+                ));
+            }
+        }
         Ok(())
     }
 }
 
-pub fn read_settings(data_dir: &Path) -> Settings {
-    let path = settings_path(data_dir);
-    let raw = match fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return Settings::default(),
+fn read_regular_to_string(path: &Path) -> io::Result<String> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
+fn reject_if_symlink(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing to access symlink {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+fn parse_settings_object(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Settings, String> {
+    let mode_override = match obj.get("modeOverride") {
+        None | Some(serde_json::Value::Null) => "auto".to_string(),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "modeOverride must be a string".to_string())?;
+            if !VALID_MODES.contains(&s) {
+                return Err(format!("invalid modeOverride {s:?}"));
+            }
+            s.to_string()
+        }
     };
-    let val: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Settings::default(),
+    let max_jobs_override = match obj.get("maxJobsOverride") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| "maxJobsOverride must be a non-negative integer".to_string())?;
+            n.min(u32::MAX as u64) as u32
+        }
     };
-    let mode_override = val
-        .get("modeOverride")
-        .and_then(|v| v.as_str())
-        .filter(|s| VALID_MODES.contains(s))
-        .unwrap_or("auto")
-        .to_string();
-    let max_jobs_override = val
-        .get("maxJobsOverride")
-        .and_then(|v| v.as_u64())
-        .map(|n| n.min(u32::MAX as u64) as u32)
-        .unwrap_or(0);
-    let ac_closed_profile = val
-        .get("acClosedProfile")
-        .and_then(|v| v.as_str())
-        .filter(|s| VALID_AC_PROFILES.contains(s))
-        .unwrap_or("utility")
-        .to_string();
-    let guard_enabled = val
-        .get("guardEnabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let thermal_bright_cap_pct = val
-        .get("thermalBrightCapPct")
-        .and_then(|v| v.as_u64())
-        .map(|n| n.min(100) as u8)
-        .unwrap_or(0);
-    let lang = val
-        .get("lang")
-        .and_then(|v| v.as_str())
-        .and_then(crate::i18n::normalize_setting_lang);
-    Settings {
+    let ac_closed_profile = match obj.get("acClosedProfile") {
+        None | Some(serde_json::Value::Null) => "utility".to_string(),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "acClosedProfile must be a string".to_string())?;
+            if !VALID_AC_PROFILES.contains(&s) {
+                return Err(format!("invalid acClosedProfile {s:?}"));
+            }
+            s.to_string()
+        }
+    };
+    let guard_enabled = match obj.get("guardEnabled") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| "guardEnabled must be a boolean".to_string())?,
+    };
+    let thermal_bright_cap_pct = match obj.get("thermalBrightCapPct") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| "thermalBrightCapPct must be an integer 0..=100".to_string())?;
+            if n > 100 {
+                return Err(format!("invalid thermalBrightCapPct {n}"));
+            }
+            n as u8
+        }
+    };
+    let lang = match obj.get("lang") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| "lang must be a string".to_string())?;
+            crate::i18n::normalize_setting_lang(s)
+        }
+    };
+    let poll_interval_sec = match obj.get("pollIntervalSec") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| "pollIntervalSec must be an integer 0..=300".to_string())?;
+            if n > 300 {
+                return Err(format!("invalid pollIntervalSec {n}"));
+            }
+            n as u32
+        }
+    };
+    let bg_poll_interval_sec = match obj.get("bgPollIntervalSec") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => {
+            let n = v
+                .as_i64()
+                .ok_or_else(|| "bgPollIntervalSec must be an integer -1..=3600".to_string())?;
+            if !(-1..=3600).contains(&n) {
+                return Err(format!("invalid bgPollIntervalSec {n}"));
+            }
+            n as i32
+        }
+    };
+    Ok(Settings {
         mode_override,
         max_jobs_override,
         ac_closed_profile,
         guard_enabled,
         thermal_bright_cap_pct,
         lang,
-    }
+        poll_interval_sec,
+        bg_poll_interval_sec,
+    })
+}
+
+pub fn try_read_settings(data_dir: &Path) -> Result<Settings, String> {
+    let path = settings_path(data_dir);
+    let raw = match read_regular_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(e) => return Err(format!("failed to read settings.json: {e}")),
+    };
+    let val: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("invalid settings.json syntax: {e}"))?;
+    let Some(obj) = val.as_object() else {
+        return Err("settings.json root must be a JSON object".to_string());
+    };
+    parse_settings_object(obj)
+}
+
+pub fn read_settings(data_dir: &Path) -> Settings {
+    try_read_settings(data_dir).unwrap_or_default()
 }
 
 pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Settings> {
@@ -274,7 +386,31 @@ pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Sett
         .validate()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let _lock = FileLock::acquire_path(&data_dir.join("settings.lock"), true)?;
-    let mut next = read_settings(data_dir);
+    let path = settings_path(data_dir);
+    reject_if_symlink(&path)?;
+    let (mut disk_map, mut next) = match read_regular_to_string(&path) {
+        Ok(raw) => {
+            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid settings.json syntax: {e}"),
+                )
+            })?;
+            let obj = val.as_object().cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "settings.json root must be a JSON object",
+                )
+            })?;
+            let parsed = parse_settings_object(&obj)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            (obj, parsed)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            (serde_json::Map::new(), Settings::default())
+        }
+        Err(e) => return Err(e),
+    };
     if let Some(m) = patch.mode_override.as_deref() {
         next.mode_override = m.to_string();
     }
@@ -298,9 +434,24 @@ pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Sett
             next.lang = crate::i18n::normalize_setting_lang(trimmed);
         }
     }
-    let body = serde_json::to_string_pretty(&next)
+    if let Some(p) = patch.poll_interval_sec {
+        next.poll_interval_sec = p as u32;
+    }
+    if let Some(bp) = patch.bg_poll_interval_sec {
+        next.bg_poll_interval_sec = bp as i32;
+    }
+    // Preserve any unknown/advanced JSON-only fields while writing canonical settings keys.
+    if let Ok(serde_json::Value::Object(canonical)) = serde_json::to_value(&next) {
+        if next.lang.is_none() {
+            disk_map.remove("lang");
+        }
+        for (k, v) in canonical {
+            disk_map.insert(k, v);
+        }
+    }
+    let body = serde_json::to_string_pretty(&serde_json::Value::Object(disk_map))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    atomic_write(&settings_path(data_dir), format!("{body}\n").as_bytes())?;
+    atomic_write(&path, format!("{body}\n").as_bytes())?;
     Ok(next)
 }
 
@@ -451,6 +602,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_dir(parent)?;
     }
+    reject_if_symlink(path)?;
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("state");
     let tmp = path.with_file_name(format!("{fname}.tmp.{}.{seq}", std::process::id()));
@@ -458,8 +610,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&tmp)
-        .and_then(|mut f| f.write_all(bytes))
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        })
         .and_then(|_| fs::rename(&tmp, path));
     if write_res.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -774,6 +930,8 @@ mod tests {
                 guard_enabled: Some(false),
                 thermal_bright_cap_pct: Some(45),
                 lang: Some("zh-CN".into()),
+                poll_interval_sec: Some(10),
+                bg_poll_interval_sec: Some(60),
             },
         )
         .unwrap();
@@ -783,6 +941,10 @@ mod tests {
         assert!(!s.guard_enabled);
         assert_eq!(s.thermal_bright_cap_pct, 45);
         assert_eq!(s.lang.as_deref(), Some("zh-CN"));
+        assert_eq!(s.poll_interval_sec, 10);
+        assert_eq!(s.bg_poll_interval_sec, 60);
+        let fp_before = file_fingerprint(&settings_path(&dir));
+        assert!(fp_before.is_some());
 
         let mode = fs::metadata(settings_path(&dir))
             .unwrap()
@@ -888,6 +1050,50 @@ mod tests {
                 });
             }
         });
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_settings_and_atomic_write_fail_closed_on_corrupt_json_and_symlinks() {
+        let dir = std::env::temp_dir().join(format!(
+            "mac-clamshell-settings-fail-closed-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_private_dir(&dir).unwrap();
+        let path = settings_path(&dir);
+
+        for bad_raw in [
+            r#"{"guardEnabled": false, invalid"#,
+            "[1, 2, 3]",
+            r#"{"modeOverride": "bogus"}"#,
+        ] {
+            fs::write(&path, bad_raw).unwrap();
+            let err = write_settings(
+                &dir,
+                &SettingsPatch {
+                    lang: Some("en".into()),
+                    ..SettingsPatch::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(fs::read_to_string(&path).unwrap(), bad_raw);
+        }
+
+        // atomic_write refuses target symlinks without touching the target
+        let target = dir.join("real-target.json");
+        let link = dir.join("link-target.json");
+        fs::write(&target, b"keep-me").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let sym_err = atomic_write(&link, b"overwrite").unwrap_err();
+        assert_eq!(sym_err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep-me");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
 
         let _ = fs::remove_dir_all(&dir);
     }

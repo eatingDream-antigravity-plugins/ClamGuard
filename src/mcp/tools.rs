@@ -309,6 +309,18 @@ pub fn list_tools_json(apps_capable: bool) -> Value {
                             "type": "string",
                             "enum": ["auto", "en", "zh-CN"],
                             "description": "Preferred UI and CLI language override (auto, en, or zh-CN)."
+                        },
+                        "pollIntervalSec": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 300,
+                            "description": "Foreground panel refresh interval in seconds (0 uses adaptive auto polling)."
+                        },
+                        "bgPollIntervalSec": {
+                            "type": "integer",
+                            "minimum": -1,
+                            "maximum": 3600,
+                            "description": "Background panel refresh interval in seconds (0 uses adaptive auto polling, -1 pauses background refresh)."
                         }
                     },
                     "additionalProperties": false
@@ -368,6 +380,33 @@ struct RefreshArgs {
     fresh: Option<bool>,
 }
 
+fn tool_error(lang: Lang, kind: &str, detail: impl Into<String>) -> Value {
+    let msg = match (lang, kind) {
+        (Lang::ZhCn, "no_builtin_display") => "这台 Mac 没有内建屏幕。",
+        (Lang::En, "no_builtin_display") => "This Mac has no built-in screen.",
+        (Lang::ZhCn, "invalid_brightness") => "亮度需在 0 到 100 之间。",
+        (Lang::En, "invalid_brightness") => "Brightness must be between 0 and 100.",
+        (Lang::ZhCn, "config_failed") => "设置保存失败。",
+        (Lang::En, "config_failed") => "Couldn't save settings.",
+        (Lang::ZhCn, "brightness_failed") => "亮度调节失败。",
+        (Lang::En, "brightness_failed") => "Couldn't change brightness.",
+        (Lang::ZhCn, "lock_failed") => "锁屏失败。",
+        (Lang::En, "lock_failed") => "Couldn't lock the screen.",
+        (Lang::ZhCn, "unknown_tool") => "不支持的操作。",
+        (Lang::En, "unknown_tool") => "Unknown action.",
+        (Lang::ZhCn, _) => "请求参数有误。",
+        (Lang::En, _) => "Invalid request.",
+    };
+    json!({
+        "isError": true,
+        "content": [{ "type": "text", "text": msg }],
+        "structuredContent": {
+            "errorKind": kind,
+            "errorDetail": detail.into()
+        }
+    })
+}
+
 pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
     name: &str,
     args: &Value,
@@ -393,18 +432,20 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             let parsed: RefreshArgs = match serde_json::from_value(args.clone()) {
                 Ok(p) => p,
                 Err(e) => {
-                    return json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": format!("Invalid refresh arguments: {e}") }]
-                    });
+                    return tool_error(
+                        engine.detect_lang(),
+                        "invalid_args",
+                        format!("Invalid refresh arguments: {e}"),
+                    );
                 }
             };
             if let Some(ref h) = parsed.if_hash {
                 if h.chars().count() > 64 {
-                    return json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": "Invalid refresh arguments: ifHash must be a string with maxLength 64" }]
-                    });
+                    return tool_error(
+                        engine.detect_lang(),
+                        "invalid_args",
+                        "ifHash must be a string with maxLength 64",
+                    );
                 }
             }
             let force = parsed.force.unwrap_or(false) || parsed.fresh.unwrap_or(false);
@@ -423,10 +464,11 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
             let patch: SettingsPatch = match serde_json::from_value(args.clone()) {
                 Ok(p) => p,
                 Err(e) => {
-                    return json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": format!("Invalid configuration arguments: {e}") }]
-                    });
+                    return tool_error(
+                        engine.detect_lang(),
+                        "invalid_args",
+                        format!("Invalid configuration arguments: {e}"),
+                    );
                 }
             };
             match engine.configure(&patch) {
@@ -445,57 +487,41 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                         "structuredContent": sc
                     })
                 }
-                Err(err) => {
-                    let msg = match engine.detect_lang() {
-                        Lang::ZhCn => format!("更新配置失败: {err}"),
-                        Lang::En => format!("Configuration update failed: {err}"),
-                    };
-                    json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": msg }]
-                    })
-                }
+                Err(err) => tool_error(engine.detect_lang(), "config_failed", err),
             }
         }
         "clamshell_set_brightness" => {
             if let Some(obj) = args.as_object() {
                 if let Some(unknown) = obj.keys().find(|k| k.as_str() != "percent") {
-                    return json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": format!("Invalid brightness arguments: unknown field `{unknown}`") }]
-                    });
+                    return tool_error(
+                        engine.detect_lang(),
+                        "invalid_args",
+                        format!("Invalid brightness arguments: unknown field `{unknown}`"),
+                    );
                 }
             }
             let Some(raw_pct) = args.get("percent").and_then(|v| v.as_f64()) else {
-                let msg = match engine.detect_lang() {
-                    Lang::ZhCn => "亮度调节失败: percent 必须是 0 到 100 之间的数字".to_string(),
-                    Lang::En => {
-                        "Brightness update failed: percent must be a finite number between 0 and 100"
-                            .to_string()
-                    }
-                };
-                return json!({
-                    "isError": true,
-                    "content": [{ "type": "text", "text": msg }]
-                });
+                return tool_error(
+                    engine.detect_lang(),
+                    "invalid_brightness",
+                    "percent must be a finite number between 0 and 100",
+                );
             };
             let clamped = match clamp_percent(raw_pct) {
                 Ok(v) => v,
                 Err(err) => {
-                    return json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": format!("Brightness update failed: {err}") }]
-                    });
+                    return tool_error(engine.detect_lang(), "invalid_brightness", err);
                 }
             };
             let t0 = Instant::now();
             match engine.set_brightness(clamped as f64, None) {
                 Ok(action) => {
                     if action.mode == "unavailable" {
-                        return json!({
-                            "isError": true,
-                            "content": [{ "type": "text", "text": "Brightness update failed: no built-in display detected on this Mac" }]
-                        });
+                        return tool_error(
+                            engine.detect_lang(),
+                            "no_builtin_display",
+                            "no built-in display detected on this Mac",
+                        );
                     }
                     let mut collected = engine.collect(true);
                     collected.server_ms = t0.elapsed().as_millis() as u64;
@@ -514,19 +540,18 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     }
                     let note = match (lang, action.mode.as_str()) {
                         (Lang::ZhCn, "saved_target") => {
-                            format!("已保存开盖恢复亮度目标: {}%", action.saved_percent)
+                            format!("屏幕唤醒后亮度恢复到 {}%。", action.saved_percent)
                         }
                         (Lang::ZhCn, _) => {
-                            format!("内建屏幕亮度已设为 {}%", action.percent.unwrap_or(clamped))
+                            format!("亮度已设为 {}%。", action.percent.unwrap_or(clamped))
                         }
                         (Lang::En, "saved_target") => format!(
-                            "Saved lid-open restore brightness target: {}%",
+                            "Brightness will go back to {}% when the screen wakes.",
                             action.saved_percent
                         ),
-                        (Lang::En, _) => format!(
-                            "Built-in display brightness set to {}%",
-                            action.percent.unwrap_or(clamped)
-                        ),
+                        (Lang::En, _) => {
+                            format!("Brightness set to {}%.", action.percent.unwrap_or(clamped))
+                        }
                     };
                     json!({
                         "content": [{ "type": "text", "text": format!("{note}\n{}", summarize_for_model(&collected.snapshot)) }],
@@ -534,14 +559,12 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     })
                 }
                 Err(err) => {
-                    let msg = match engine.detect_lang() {
-                        Lang::ZhCn => format!("亮度调节失败: {err}"),
-                        Lang::En => format!("Brightness update failed: {err}"),
+                    let kind = if err.contains("no built-in display") {
+                        "no_builtin_display"
+                    } else {
+                        "brightness_failed"
                     };
-                    json!({
-                        "isError": true,
-                        "content": [{ "type": "text", "text": msg }]
-                    })
+                    tool_error(engine.detect_lang(), kind, err)
                 }
             }
         }
@@ -551,18 +574,16 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                 let verified = outcome.verified;
                 let status = if verified { "verified" } else { "submitted" };
                 let text = match (engine.detect_lang(), verified) {
-                    (Lang::ZhCn, true) => {
-                        format!("已锁屏（{method}，已核验会话锁），Mac 将保持唤醒以继续运行后台任务。")
-                    }
+                    (Lang::ZhCn, true) => "已锁屏，Mac 保持唤醒，后台任务照常运行。".to_string(),
                     (Lang::ZhCn, false) => {
-                        format!("已提交锁屏请求（{method}，未核验会话锁状态），Mac 将保持唤醒。")
+                        "已发送锁屏，但没能确认是否锁上。Mac 保持唤醒。".to_string()
                     }
-                    (Lang::En, true) => format!(
-                        "Screen locked ({method}, verified); Mac remains awake for background tasks."
-                    ),
-                    (Lang::En, false) => format!(
-                        "Lock screen request submitted ({method}, session lock not verified); Mac remains awake."
-                    ),
+                    (Lang::En, true) => {
+                        "Screen locked. Your Mac stays awake for background tasks.".to_string()
+                    }
+                    (Lang::En, false) => {
+                        "Lock sent, but couldn't confirm it. Your Mac stays awake.".to_string()
+                    }
                 };
                 json!({
                     "content": [{ "type": "text", "text": text }],
@@ -576,20 +597,36 @@ pub fn call_tool_json<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
                     }
                 })
             }
-            Err(err) => {
-                let msg = match engine.detect_lang() {
-                    Lang::ZhCn => format!("锁屏失败: {err}"),
-                    Lang::En => format!("Failed to lock screen: {err}"),
-                };
-                json!({
-                    "isError": true,
-                    "content": [{ "type": "text", "text": msg }]
-                })
-            }
+            Err(err) => tool_error(engine.detect_lang(), "lock_failed", err),
         },
-        other => json!({
-            "isError": true,
-            "content": [{ "type": "text", "text": format!("Unknown tool: {other}") }]
-        }),
+        other => tool_error(
+            engine.detect_lang(),
+            "unknown_tool",
+            format!("Unknown tool: {other}"),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_tool_names_stay_within_64_chars_and_errors_are_localized() {
+        let tools = list_tools_json(true)["tools"].as_array().unwrap().clone();
+        assert_eq!(tools.len(), 5);
+        for tool in &tools {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                name.len() <= 64,
+                "tool name {name} exceeds 64 chars ({})",
+                name.len()
+            );
+        }
+        let zh_err = tool_error(Lang::ZhCn, "lock_failed", "raw stderr");
+        assert_eq!(zh_err["isError"], true);
+        assert_eq!(zh_err["structuredContent"]["errorKind"], "lock_failed");
+        assert_eq!(zh_err["structuredContent"]["errorDetail"], "raw stderr");
+        assert_eq!(zh_err["content"][0]["text"], "锁屏失败。");
     }
 }

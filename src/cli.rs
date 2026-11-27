@@ -16,26 +16,26 @@ use serde_json::json;
 use std::path::PathBuf;
 
 const USAGE_EN: &str = "\
-Mac Clamshell MCP — native macOS clamshell throttling, display guard, brightness & MCP server
+Clam Guard — keeps your Mac cool and the screen dark with the lid closed.
 
 USAGE:
   mac-clamshell-mcp <COMMAND> [OPTIONS]
 
 COMMANDS:
   serve [--data-dir DIR] [--panel-html PATH]
-      Run the MCP stdio JSON-RPC server (active display guard + SEP-1865 dashboard).
+      Run the MCP stdio JSON-RPC server (active lid guard + dashboard).
 
   status [--json] [--data-dir DIR]
-      Inspect live macOS lid state, power, thermal pressure, display brightness, and active policy.
+      Inspect live macOS lid state, power, heat, built-in brightness, and active mode.
 
   brightness [get | set <0..100>] [--json] [--lid-state open|closed] [--data-dir DIR]
-      Read or set built-in display brightness (0-100%) in sync with display guard wake-restore.
+      Read or set built-in screen brightness (0-100%) in sync with lid guard wake-restore.
 
   lock [--json] [--data-dir DIR]
       Lock the macOS screen immediately without putting the Mac to sleep.
 
   guard <install | uninstall | status> [--interval SECS] [--bin PATH] [--json] [--data-dir DIR]
-      Install, remove, or inspect the standalone 24/7 macOS LaunchAgent display guard.
+      Install, remove, or inspect the standalone 24/7 macOS LaunchAgent lid guard.
 
   run [--mode auto|normal|utility|eco|strict] [--jobs N] [--quiet|-q] [--data-dir DIR]
       (--sh \"<cmd>\" | [--] <cmd> [args...])
@@ -45,26 +45,26 @@ COMMANDS:
       Antigravity lifecycle hook (early-exit JSON stdin -> JSON stdout, always fail-open).
 
   watch [--daemon] [--interval SECS] [--data-dir DIR]
-      Run one display guard check (for LaunchAgent StartInterval) or loop as a foreground daemon.
+      Run one lid guard check (for LaunchAgent StartInterval) or loop as a foreground daemon.
 
   --version, -V    Print version
   --help, -h       Print help";
 
 const USAGE_ZH: &str = "\
-Mac Clamshell MCP — macOS 合盖性能调控、熄屏护眼守护、内建亮度与 MCP 服务
+Clam Guard —— 合盖时让 Mac 保持凉爽、屏幕不亮。
 
-用法:
+用法：
   mac-clamshell-mcp <命令> [选项]
 
-命令:
+命令：
   serve [--data-dir DIR] [--panel-html PATH]
-      启动 MCP stdio JSON-RPC 服务（内置合盖熄屏守护 + SEP-1865 控制面板）。
+      启动 MCP stdio 服务（内置合盖熄屏保护与控制面板）。
 
   status [--json] [--data-dir DIR]
-      查看当前开合盖、供电、热压力、内建屏幕亮度、守护状态与生效策略。
+      查看当前机盖、电源、温度、内建屏幕亮度、守护状态与当前模式。
 
   brightness [get | set <0..100>] [--json] [--lid-state open|closed] [--data-dir DIR]
-      读取或设置内建屏幕亮度（0-100%），合盖时安全更新开盖恢复目标。
+      读取或设置内建屏幕亮度（0-100%），合盖时仅保存唤醒恢复亮度。
 
   lock [--json] [--data-dir DIR]
       立即锁定 macOS 屏幕并保持 Mac 唤醒，不中断后台构建或 Agent 任务。
@@ -74,13 +74,13 @@ Mac Clamshell MCP — macOS 合盖性能调控、熄屏护眼守护、内建亮�
 
   run [--mode auto|normal|utility|eco|strict] [--jobs N] [--quiet|-q] [--data-dir DIR]
       (--sh \"<cmd>\" | [--] <cmd> [args...])
-      按当前状态使用 taskpolicy、nice 与构建并发环境变量包裹执行命令。
+      按当前状态使用 taskpolicy、nice 与并发环境变量运行命令。
 
   hook <session-start | pre-invocation> [--data-dir DIR]
-      Antigravity 生命周期钩子（快速平衡 JSON 读取，失败默认放行）。
+      Antigravity 生命周期钩子（快速读取 JSON，失败默认放行）。
 
   watch [--daemon] [--interval SECS] [--data-dir DIR]
-      单次执行或前台常驻运行合盖熄屏与热限亮守护。
+      单次执行或前台常驻运行合盖熄屏与高温降亮守护。
 
   --version, -V    显示版本号
   --help, -h       显示帮助信息";
@@ -256,63 +256,63 @@ fn cmd_status(args: &[String]) -> i32 {
                         String::new()
                     };
                     let panel_state = if s.display.internal_offline {
-                        "内屏已离线"
+                        "屏幕已关"
                     } else if s.display.confirmed_asleep {
-                        "已确认熄屏"
+                        "屏幕已熄"
                     } else {
-                        "内屏仍在线"
+                        "屏幕亮着"
                     };
                     format!(
-                        "已合盖（{panel_state}{ext}），恢复目标 {}%",
+                        "已合盖（{panel_state}{ext}），唤醒后恢复 {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
                 } else if s.display.confirmed_asleep {
                     format!(
-                        "已熄屏，恢复目标 {}%",
+                        "屏幕已熄，唤醒后恢复 {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
                     )
                 } else {
-                    format!("{}%（点亮）", s.display.percent.unwrap_or(0))
+                    format!("{}%（亮着）", s.display.percent.unwrap_or(0))
                 }
             } else {
-                "未检测到内建屏幕".to_string()
+                "没有内建屏幕".to_string()
             };
             let lpm_zh = match s.low_power_mode.as_str() {
-                "1" => "已开启",
-                "0" => "未开启",
+                "1" => "开",
+                "0" => "关",
                 _ => "未知",
             };
             let guard_zh = match s.guard_status.as_str() {
-                "protecting" => "熄屏保护中",
-                "thermal_cap" => "温控限亮中",
-                "armed" => "常驻就绪",
+                "protecting" => "保护中",
+                "thermal_cap" => "屏幕：高温降亮",
+                "armed" => "后台运行中",
                 "paused" => "已暂停",
-                _ => "空闲（MCP 运行时自动激活）",
+                _ => "空闲（在 Antigravity 打开时自动启用）",
             };
             let src_zh = if s.policy.mode_source == "manual" {
-                "手动锁定"
+                "手动"
             } else {
-                "自动识别"
+                "自动"
             };
 
-            println!("Mac Clamshell 状态");
-            println!("  盒盖状态   : {}", format_lid(&s.lid_state, lang));
+            println!("Clam Guard 状态");
+            println!("  机盖状态   : {}", format_lid(&s.lid_state, lang));
             println!(
-                "  电源供电   : {}",
+                "  电源       : {}",
                 format_power(&s.power_source, s.battery_pct, lang)
             );
-            println!("  温控压力   : {therm_str}");
+            println!("  温度       : {therm_str}");
             println!("  风扇       : {}", format_fan(&s.fan, lang));
             println!("  低电量模式 : {lpm_zh}");
             println!("  内建屏幕   : {disp_str}");
-            println!("  熄屏守护   : {guard_zh}");
-            println!("  处理器拓扑 : {topo_str}");
+            println!("  合盖守护   : {guard_zh}");
+            println!("  处理器     : {topo_str}");
             println!(
-                "  生效档位   : {} [{src_zh}] — {prof_str}",
+                "  当前模式   : {} [{src_zh}] — {prof_str}",
                 s.policy.profile
             );
             println!(
-                "  调度参数   : {tp} (nice={}, 并发上限={})",
+                "  调度参数   : {tp} (nice={}, 最多 {} 个任务)",
                 s.policy.nice_level, s.policy.max_jobs
             );
         }
@@ -325,47 +325,54 @@ fn cmd_status(args: &[String]) -> i32 {
                         String::new()
                     };
                     let panel_state = if s.display.internal_offline {
-                        "internal offline"
+                        "screen off"
                     } else if s.display.confirmed_asleep {
-                        "confirmed asleep"
+                        "screen asleep"
                     } else {
-                        "internal online"
+                        "screen on"
                     };
                     format!(
-                        "closed ({panel_state}{ext}), saved target {}%",
+                        "closed ({panel_state}{ext}), wakes at {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
                 } else if s.display.confirmed_asleep {
                     format!(
-                        "asleep, saved target {}%",
+                        "screen asleep, wakes at {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
                     )
                 } else {
-                    format!("{}% (awake)", s.display.percent.unwrap_or(0))
+                    format!("{}% (screen on)", s.display.percent.unwrap_or(0))
                 }
             } else {
-                "unavailable".to_string()
+                "no built-in screen".to_string()
             };
             let lpm_en = match s.low_power_mode.as_str() {
                 "1" => "on",
                 "0" => "off",
                 _ => "unknown",
             };
+            let guard_en = match s.guard_status.as_str() {
+                "protecting" => "protecting",
+                "thermal_cap" => "Screen: dimmed for heat",
+                "armed" => "on",
+                "paused" => "paused",
+                _ => "idle",
+            };
 
-            println!("Mac Clamshell Status");
+            println!("Clam Guard Status");
             println!("  Lid State      : {}", format_lid(&s.lid_state, lang));
             println!(
                 "  Power Source   : {}",
                 format_power(&s.power_source, s.battery_pct, lang)
             );
-            println!("  Thermal        : {therm_str}");
+            println!("  Heat           : {therm_str}");
             println!("  Fans           : {}", format_fan(&s.fan, lang));
             println!("  Low Power Mode : {lpm_en}");
-            println!("  Display        : {disp_str}");
-            println!("  Display Guard  : {}", s.guard_status);
-            println!("  CPU Topology   : {topo_str}");
+            println!("  Screen         : {disp_str}");
+            println!("  Lid Guard      : {guard_en}");
+            println!("  CPU            : {topo_str}");
             println!(
-                "  Active Profile : {} [{}] — {prof_str}",
+                "  Active Mode    : {} [{}] — {prof_str}",
                 s.policy.profile, s.policy.mode_source
             );
             println!(
@@ -525,20 +532,19 @@ fn cmd_brightness(args: &[String]) -> i32 {
                 );
             } else if action.mode == "saved_target" {
                 match lang {
-                    Lang::ZhCn => println!(
-                        "已保存开盖恢复亮度目标: {}% (延迟应用={})",
-                        action.saved_percent, action.deferred
-                    ),
+                    Lang::ZhCn => {
+                        println!("屏幕唤醒后亮度恢复到 {}%（下次生效）", action.saved_percent)
+                    }
                     Lang::En => println!(
-                        "saved restore target: {}% (deferred={})",
-                        action.saved_percent, action.deferred
+                        "Brightness will go back to {}% when the screen wakes (applies next time)",
+                        action.saved_percent
                     ),
                 }
             } else {
                 let p = action.percent.unwrap_or(action.requested_percent);
                 match lang {
-                    Lang::ZhCn => println!("内建屏幕亮度已设为 {p}%"),
-                    Lang::En => println!("brightness set to {p}%"),
+                    Lang::ZhCn => println!("亮度已设为 {p}%"),
+                    Lang::En => println!("Brightness set to {p}%"),
                 }
             }
             0
@@ -779,7 +785,7 @@ fn cmd_guard(args: &[String]) -> i32 {
             } else {
                 match lang {
                     Lang::ZhCn => {
-                        println!("Mac Clamshell 熄屏守护状态");
+                        println!("Clam Guard 合盖守护状态");
                         println!(
                             "  守护开关     : {}",
                             if st.guard_enabled {
@@ -791,11 +797,11 @@ fn cmd_guard(args: &[String]) -> i32 {
                         println!(
                             "  LaunchAgent  : {} ({})",
                             if st.loaded {
-                                "运行中"
+                                "后台运行中"
                             } else if st.plist_installed {
                                 "已安装未加载"
                             } else {
-                                "未安装（仅 Antigravity 打开时生效）"
+                                "未安装（仅在 Antigravity 打开时生效）"
                             },
                             st.plist_path
                         );
@@ -804,7 +810,7 @@ fn cmd_guard(args: &[String]) -> i32 {
                         }
                     }
                     Lang::En => {
-                        println!("Mac Clamshell Display Guard");
+                        println!("Clam Guard Lid Guard");
                         println!(
                             "  Guard Toggle : {}",
                             if st.guard_enabled {

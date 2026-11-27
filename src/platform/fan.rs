@@ -158,38 +158,44 @@ impl Sensors {
 
         let yield_mode = smc_mode == "manual" || !external_managers.is_empty();
         let ownership_mode = if yield_mode { "yield" } else { "observer" };
-        let note = match (smc_mode, external_managers.is_empty(), detected_monitors.is_empty()) {
+        let note = match (
+            smc_mode,
+            external_managers.is_empty(),
+            detected_monitors.is_empty(),
+        ) {
             ("none", _, _) => {
-                "Mac Clamshell is read-only; no hardware fans detected (passive cooling).".to_string()
+                "Clam Guard is read-only; no hardware fans detected (passive cooling).".to_string()
             }
             ("manual", false, _) => format!(
-                "Mac Clamshell is read-only (SMC mode: manual); detected fan-control software: {}.",
+                "Clam Guard is read-only (SMC mode: manual); detected fan-control software: {}.",
                 external_managers.join(", ")
             ),
             ("manual", true, _) => {
-                "Mac Clamshell is read-only (SMC mode: manual); yields fan control.".to_string()
+                "Clam Guard is read-only (SMC mode: manual); yields fan control.".to_string()
             }
             ("auto", false, _) => format!(
-                "Mac Clamshell is read-only (SMC mode: auto); detected fan-control software: {}.",
+                "Clam Guard is read-only (SMC mode: auto); detected fan-control software: {}.",
                 external_managers.join(", ")
             ),
             ("auto", true, false) => format!(
-                "Mac Clamshell is read-only (SMC mode: auto); detected monitoring software: {}.",
+                "Clam Guard is read-only (SMC mode: auto); detected monitoring software: {}.",
                 detected_monitors.join(", ")
             ),
             ("auto", true, true) => {
-                "Mac Clamshell is read-only (SMC mode: auto) and never writes SMC fan keys.".to_string()
+                "Clam Guard is read-only (SMC mode: auto) and never writes SMC fan keys."
+                    .to_string()
             }
             (_, false, _) => format!(
-                "Mac Clamshell is read-only (SMC mode: unknown); detected fan-control software: {}.",
+                "Clam Guard is read-only (SMC mode: unknown); detected fan-control software: {}.",
                 external_managers.join(", ")
             ),
             (_, true, false) => format!(
-                "Mac Clamshell is read-only (SMC mode: unknown); detected monitoring software: {}.",
+                "Clam Guard is read-only (SMC mode: unknown); detected monitoring software: {}.",
                 detected_monitors.join(", ")
             ),
             (_, true, true) => {
-                "Mac Clamshell is read-only (SMC mode: unknown) and never writes SMC fan keys.".to_string()
+                "Clam Guard is read-only (SMC mode: unknown) and never writes SMC fan keys."
+                    .to_string()
             }
         };
 

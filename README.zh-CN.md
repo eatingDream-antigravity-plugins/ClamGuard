@@ -4,15 +4,17 @@
 
 # Clam Guard (`mac-clamshell-mcp`)
 
-**让合盖跑编译与 AI Agent 的 MacBook 保持凉快、安静且安全，不再莫名发烫或误点亮内屏。**
+**合盖跑 Agent，不让 Mac 发烫。**
+
+Clam Guard 能在你合上 MacBook 机盖时保持系统唤醒且内屏熄灭，并随温度变化自动放缓重任务；它只读取风扇和温度状态，从不接管风扇控制。
 
 [主页](https://clamguard.eatingdream.dev) · [English](README.md) | **简体中文** · [Releases](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases) · [AI 指南](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
 [![CI](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml)
 [![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases)
-![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
-![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/license-MIT-1A1916)](LICENSE)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-12151E?logo=rust&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-12151E?logo=apple&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-12151E)](LICENSE)
 
 <br>
 
@@ -39,12 +41,12 @@
 | **只读风扇状态透视** | 查看实时风扇转速与当前控制方（系统或 `Macs Fan Control`、`TG Pro`、`smcFanControl`），全程只读零写入。 |
 | **原生 Rust、零 `sudo`** | 单个本地可执行文件，支持 Apple Silicon 与 Intel，零外网请求，配置采用仅当前用户可读写（`0600`）权限。 |
 
-| 档位 | 触发条件 | 实际效果 |
+| 模式 | 触发条件 | 实际效果 |
 | :--- | :--- | :--- |
-| **Normal / 正常** | 开盖且温度正常 | 全速运行，不限流 |
-| **Utility / 控温** | 合盖插电 | Utility QoS（`nice 10`），按能效核限流（`2–4` 并发） |
-| **Eco / 节能** | 合盖电池供电 | Background QoS（`nice 15`），最多 `2` 并发（`<=20%` 降为 `1`） |
-| **Strict / 强限** | 严重/临界热压力 | 最低优先级（`taskpolicy -b`、`nice 19`），单任务串行 |
+| **正常** (`Normal`) | 开盖且温度正常 | 全速运行，不限制 |
+| **控温** (`Cool`) | 合盖插电 | 降低优先级（`nice 10`），按能效核限流（`2–4` 个任务） |
+| **节能** (`Eco`) | 合盖电池供电 | 后台优先级（`nice 15`），最多 `2` 个任务（电量 `<=20%` 降为 `1`） |
+| **严格** (`Strict`) | 过热降频或严重过热 | 最低优先级（`taskpolicy -b`、`nice 19`），一次 `1` 个任务 |
 
 ## 快速开始
 
@@ -52,7 +54,7 @@
 curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
 ```
 
-<sub>安装脚本自动校验发行版 SHA-256 · 支持 macOS（Apple Silicon / Intel） · 可用 `MAC_CLAMSHELL_VERSION=vX.Y.Z` 指定版本 · 随时可用 `curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall` 干净卸载。</sub>
+<sub>安装脚本自动校验发行版 SHA-256 · 在 Antigravity 内自动通过 `RefreshMcpServers` 热刷新 MCP 服务（外部终端可加 `--reload`，跳过可加 `--no-reload`）· 支持 macOS（Apple Silicon / Intel）· 可用 `MAC_CLAMSHELL_VERSION=vX.Y.Z` 指定版本 · 随时可用 `curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall` 干净卸载。</sub>
 
 重载 Antigravity 后打开 **Clam Guard** 面板，或直接在终端运行：
 
@@ -86,7 +88,7 @@ npx skills add eatingDream-antigravity-plugins/clam-guard
 
 ## Antigravity 插件套件
 
-隶属于 [eatingDream Antigravity 插件套件](https://eatingdream.dev)：[Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar)（`context-radar-mcp`）· **Clam Guard**（`mac-clamshell-mcp`）· [Remote Cast](https://github.com/eatingDream-antigravity-plugins/remote-cast)（`chrome-stream-mcp`）· [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck)（`colab-mcp`），由 [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit)（`agy-mcp-kit`）统一驱动。
+隶属于 [Antigravity Plugins](https://github.com/eatingDream-antigravity-plugins) 套件：[Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) · **Clam Guard** · [Remote Cast](https://github.com/eatingDream-antigravity-plugins/remote-cast) · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) · [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit)
 
 ## 许可证
 

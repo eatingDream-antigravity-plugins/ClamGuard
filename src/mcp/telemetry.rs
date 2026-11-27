@@ -5,12 +5,12 @@ use crate::platform::display_ffi::{DisplayBackend, LockScreenOutcome};
 use crate::platform::fan::{FanSensorSource, FanTelemetry};
 use crate::platform::macos::{MemorySummary, ProbeBackend};
 use crate::policy::{
-    build_env_vars, compute_policy, compute_profile_jobs, format_lid, format_power, format_thermal,
-    CpuTopology, Policy, ProfileJobs,
+    build_env_vars, compute_policy, compute_profile_jobs, format_lid, format_power,
+    format_profile_name, format_thermal, CpuTopology, Policy, ProfileJobs,
 };
 use crate::state::{
     abbreviate_home, file_fingerprint, format_iso8601_utc, guard_state_path, load_guard_state,
-    load_guard_state_opt, now_epoch_ms, read_settings, settings_path, sha256_hex_16,
+    load_guard_state_opt, now_epoch_ms, settings_path, sha256_hex_16, try_read_settings,
     write_settings, DaemonLock, DisplayGuardSummary, FileFingerprint, Settings, SettingsPatch,
 };
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,8 @@ pub struct TelemetrySnapshot {
     pub low_power_mode: String,
     pub cpu_topology: CpuTopology,
     pub settings: Settings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_error: Option<String>,
     pub policy: Policy,
     pub profile_jobs: ProfileJobs,
     pub env_vars: BTreeMap<String, String>,
@@ -115,6 +117,7 @@ pub fn compute_telemetry_hash(s: &TelemetrySnapshot) -> String {
         "lowPowerMode": s.low_power_mode,
         "cpuTopology": s.cpu_topology,
         "settings": s.settings,
+        "settingsError": s.settings_error,
         "policy": s.policy,
         "profileJobs": s.profile_jobs,
         "envVars": s.env_vars,
@@ -143,8 +146,8 @@ pub fn format_fan(fan: &FanTelemetry, lang: Lang) -> String {
     let readings = match (lang, fan.status.as_str()) {
         (Lang::ZhCn, "fanless") => "无风扇".to_string(),
         (Lang::En, "fanless") => "fanless".to_string(),
-        (Lang::ZhCn, "unavailable") => "传感器不可用".to_string(),
-        (Lang::En, "unavailable") => "sensor unavailable".to_string(),
+        (Lang::ZhCn, "unavailable") => "读不到风扇".to_string(),
+        (Lang::En, "unavailable") => "can't read fans".to_string(),
         _ => fan
             .fans
             .iter()
@@ -173,23 +176,21 @@ pub fn format_fan(fan: &FanTelemetry, lang: Lang) -> String {
     let software = if !fan.external_managers.is_empty() {
         let joined = fan.external_managers.join(", ");
         match lang {
-            Lang::ZhCn => format!("，检测到控扇软件: {joined}"),
+            Lang::ZhCn => format!("，检测到风扇控制软件：{joined}"),
             Lang::En => format!(", detected fan control: {joined}"),
         }
     } else if !fan.detected_monitors.is_empty() {
         let joined = fan.detected_monitors.join(", ");
         match lang {
-            Lang::ZhCn => format!("，检测到监测软件: {joined}"),
+            Lang::ZhCn => format!("，检测到监测软件：{joined}"),
             Lang::En => format!(", detected monitor: {joined}"),
         }
     } else {
         String::new()
     };
-    match (lang, fan.ownership_mode.as_str()) {
-        (Lang::ZhCn, "yield") => format!("{readings}（只读，{mode_desc}{software}）"),
-        (Lang::ZhCn, _) => format!("{readings}（只读，{mode_desc}{software}）"),
-        (Lang::En, "yield") => format!("{readings} (read-only, {mode_desc}{software})"),
-        (Lang::En, _) => format!("{readings} (read-only, {mode_desc}{software})"),
+    match lang {
+        Lang::ZhCn => format!("{readings}（只读，{mode_desc}{software}）"),
+        Lang::En => format!("{readings} (read-only, {mode_desc}{software})"),
     }
 }
 
@@ -203,11 +204,7 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
         s.cpu_speed_limit_pct,
         lang,
     );
-    let tp = if s.policy.taskpolicy.is_empty() {
-        "none"
-    } else {
-        s.policy.taskpolicy.as_str()
-    };
+    let prof_label = format_profile_name(&s.policy.profile, lang);
 
     match lang {
         Lang::ZhCn => {
@@ -219,43 +216,43 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                         String::new()
                     };
                     let panel_state = if s.display.internal_offline {
-                        "内屏已离线"
+                        "屏幕已关"
                     } else if s.display.confirmed_asleep {
-                        "已确认熄屏"
+                        "屏幕已熄"
                     } else {
-                        "内屏仍在线"
+                        "屏幕亮着"
                     };
                     format!(
-                        "已合盖（{panel_state}{ext}），恢复目标 {}%",
+                        "已合盖（{panel_state}{ext}），唤醒后恢复 {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
                 } else if s.display.confirmed_asleep {
                     format!(
-                        "已熄屏，恢复目标 {}%",
+                        "屏幕已熄，唤醒后恢复 {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
                     )
                 } else {
-                    format!("{}%（点亮）", s.display.percent.unwrap_or(0))
+                    format!("{}%（亮着）", s.display.percent.unwrap_or(0))
                 }
             } else {
-                "未检测到内建屏幕".to_string()
+                "没有内建屏幕".to_string()
             };
             let guard_desc = match s.guard_status.as_str() {
-                "protecting" => "熄屏保护中",
-                "thermal_cap" => "温控限亮中",
-                "armed" => "守护运行中",
+                "protecting" => "保护中",
+                "thermal_cap" => "高温降亮",
+                "armed" => "运行中",
                 "paused" => "已暂停",
                 _ => "空闲",
             };
             [
-                format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
-                format!("- 盒盖: {lid_label}，电源: {power_label}，温控: {therm_label}"),
+                format!("Clam Guard（{} · {}）", s.host.hostname, s.host.chip),
+                format!("- 机盖：{lid_label}，电源：{power_label}，温度：{therm_label}"),
                 format!(
-                    "- 生效策略: profile={} ({})，最高并发={}，taskpolicy=\"{tp}\"，nice={}",
-                    s.policy.profile, s.policy.mode_source, s.policy.max_jobs, s.policy.nice_level
+                    "- 当前模式：{prof_label}，最多 {} 个任务",
+                    s.policy.max_jobs
                 ),
                 format!(
-                    "- 系统负载: {:.2} / {:.2} / {:.2}，内存: {:.1}/{:.1} GB ({}%)",
+                    "- 系统负载：{:.2} / {:.2} / {:.2}，内存：{:.1}/{:.1} GB ({}%)",
                     s.host.load_avg[0],
                     s.host.load_avg[1],
                     s.host.load_avg[2],
@@ -263,8 +260,8 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                     s.host.memory.total_gb,
                     s.host.memory.used_pct
                 ),
-                format!("- 风扇: {}", format_fan(&s.fan, lang)),
-                format!("- 内建屏幕: {disp_desc}（守护: {guard_desc}）"),
+                format!("- 风扇：{}", format_fan(&s.fan, lang)),
+                format!("- 内建屏幕：{disp_desc}（守护：{guard_desc}）"),
             ]
             .join("\n")
         }
@@ -277,33 +274,40 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                         String::new()
                     };
                     let panel_state = if s.display.internal_offline {
-                        "internal offline"
+                        "screen off"
                     } else if s.display.confirmed_asleep {
-                        "confirmed asleep"
+                        "screen asleep"
                     } else {
-                        "internal online"
+                        "screen on"
                     };
                     format!(
-                        "closed ({panel_state}{ext}), saved target {}%",
+                        "closed ({panel_state}{ext}), wakes at {}%",
                         s.display.saved_percent.unwrap_or(20)
                     )
                 } else if s.display.confirmed_asleep {
                     format!(
-                        "asleep, saved target {}%",
+                        "screen asleep, wakes at {}%",
                         s.display.saved_percent.or(s.display.percent).unwrap_or(20)
                     )
                 } else {
-                    format!("{}% (awake)", s.display.percent.unwrap_or(0))
+                    format!("{}% (screen on)", s.display.percent.unwrap_or(0))
                 }
             } else {
-                "unavailable".to_string()
+                "no built-in screen".to_string()
+            };
+            let guard_desc = match s.guard_status.as_str() {
+                "protecting" => "protecting",
+                "thermal_cap" => "dimmed for heat",
+                "armed" => "on",
+                "paused" => "paused",
+                _ => "idle",
             };
             [
-                format!("Mac Clamshell ({} · {})", s.host.hostname, s.host.chip),
-                format!("- Lid: {lid_label}, Power: {power_label}, Thermal: {therm_label}"),
+                format!("Clam Guard ({} · {})", s.host.hostname, s.host.chip),
+                format!("- Lid: {lid_label}, Power: {power_label}, Heat: {therm_label}"),
                 format!(
-                    "- Active Policy: profile={} ({}), max_jobs={}, taskpolicy=\"{tp}\", nice={}",
-                    s.policy.profile, s.policy.mode_source, s.policy.max_jobs, s.policy.nice_level
+                    "- Current mode: {prof_label}, up to {} jobs",
+                    s.policy.max_jobs
                 ),
                 format!(
                     "- Load Avg: {:.2} / {:.2} / {:.2}, Memory: {:.1}/{:.1} GB ({}%)",
@@ -315,10 +319,7 @@ pub fn summarize_for_model(s: &TelemetrySnapshot) -> String {
                     s.host.memory.used_pct
                 ),
                 format!("- Fans: {}", format_fan(&s.fan, lang)),
-                format!(
-                    "- Built-in Display: {disp_desc} (guard: {})",
-                    s.guard_status
-                ),
+                format!("- Built-in Screen: {disp_desc} (guard: {guard_desc})"),
             ]
             .join("\n")
         }
@@ -373,6 +374,12 @@ struct Coalescer {
     in_flight: Option<Arc<(Mutex<InFlightSlot>, Condvar)>>,
 }
 
+struct SettingsWatchState {
+    last_fp: FileFingerprint,
+    last_good: Settings,
+    last_error: Option<String>,
+}
+
 pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
     data_dir: PathBuf,
     binary_path: String,
@@ -383,6 +390,7 @@ pub struct TelemetryEngine<P: ProbeBackend, D: DisplayBackend> {
     settings_gen: AtomicU64,
     bg_guard_active: AtomicBool,
     guard_wake: (Mutex<u64>, Condvar),
+    settings_watch: Mutex<SettingsWatchState>,
     state: Mutex<Coalescer>,
 }
 
@@ -412,6 +420,11 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
         fan: impl FanSensorSource + 'static,
         cache_ttl_ms: u64,
     ) -> Self {
+        let init_fp = file_fingerprint(&settings_path(&data_dir));
+        let (last_good, last_error) = match try_read_settings(&data_dir) {
+            Ok(s) => (s, None),
+            Err(e) => (Settings::default(), Some(e)),
+        };
         Self {
             data_dir,
             binary_path,
@@ -422,11 +435,37 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             settings_gen: AtomicU64::new(0),
             bg_guard_active: AtomicBool::new(false),
             guard_wake: (Mutex::new(0), Condvar::new()),
+            settings_watch: Mutex::new(SettingsWatchState {
+                last_fp: init_fp,
+                last_good,
+                last_error,
+            }),
             state: Mutex::new(Coalescer {
                 cache: None,
                 in_flight: None,
             }),
         }
+    }
+
+    /// Non-destructive hot-reload of `settings.json` on `(mtime_ns, size, ino)` change.
+    /// Fails closed on syntax/validation errors: preserves `last_good` and surfaces `settingsError`.
+    pub fn reload_settings_if_changed(&self) -> (Settings, Option<String>) {
+        let fp = file_fingerprint(&settings_path(&self.data_dir));
+        let mut sw = lock_unpoisoned(&self.settings_watch);
+        if fp != sw.last_fp {
+            sw.last_fp = fp;
+            match try_read_settings(&self.data_dir) {
+                Ok(s) => {
+                    sw.last_good = s;
+                    sw.last_error = None;
+                }
+                Err(e) => {
+                    sw.last_error = Some(e);
+                }
+            }
+            self.settings_gen.fetch_add(1, Ordering::SeqCst);
+        }
+        (sw.last_good.clone(), sw.last_error.clone())
     }
 
     pub fn set_bg_guard_active(&self, active: bool) {
@@ -468,6 +507,12 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     pub fn configure(&self, patch: &SettingsPatch) -> Result<Settings, String> {
         let updated = write_settings(&self.data_dir, patch)
             .map_err(|e| format!("failed to write settings: {e}"))?;
+        {
+            let mut sw = lock_unpoisoned(&self.settings_watch);
+            sw.last_fp = file_fingerprint(&settings_path(&self.data_dir));
+            sw.last_good = updated.clone();
+            sw.last_error = None;
+        }
         if patch.guard_enabled.is_some() || patch.thermal_bright_cap_pct.is_some() {
             self.notify_guard_wake();
         }
@@ -494,7 +539,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     }
 
     pub fn detect_lang(&self) -> Lang {
-        let settings = read_settings(&self.data_dir);
+        let (settings, _) = self.reload_settings_if_changed();
         detect_lang(settings.lang.as_deref())
     }
 
@@ -558,6 +603,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     /// and passive disk fingerprint observation for external guard daemons.
     pub fn collect(&self, force: bool) -> CollectedTelemetry {
         let t0 = Instant::now();
+        let _ = self.reload_settings_if_changed();
         let req_gen = self.settings_gen.load(Ordering::SeqCst);
         let cur_fps = if !force {
             Some(self.disk_fingerprints())
@@ -695,7 +741,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
     }
 
     fn probe_snapshot(&self, force: bool) -> TelemetrySnapshot {
-        let settings = read_settings(&self.data_dir);
+        let (settings, settings_error) = self.reload_settings_if_changed();
         let lang = detect_lang(settings.lang.as_deref());
         let guard_opt = load_guard_state_opt(&self.data_dir);
         let guard_for_disp = guard_opt
@@ -761,6 +807,7 @@ impl<P: ProbeBackend, D: DisplayBackend> TelemetryEngine<P, D> {
             low_power_mode: hw.low_power_mode,
             cpu_topology: host_info.cpu_topology,
             settings,
+            settings_error,
             policy,
             profile_jobs,
             env_vars,

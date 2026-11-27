@@ -34,6 +34,7 @@ fn apply_concurrency_env(cmd: &mut Command, max_jobs: u32) {
         max_jobs,
         taskpolicy: String::new(),
         nice_level: 0,
+        jobs_overridden: false,
     };
     for (k, v) in build_env_vars(&dummy) {
         if k != "MAKEFLAGS" {
@@ -91,7 +92,7 @@ pub fn execute_run(data_dir: &Path, opts: RunOptions) -> Result<i32, String> {
         cmd.args(&target_argv[1..]);
         cmd.env("MAC_CLAMSHELL_PROFILE", &policy.profile);
         cmd.env("MAC_CLAMSHELL_MAX_JOBS", policy.max_jobs.to_string());
-        if opts.override_jobs.is_some() {
+        if opts.override_jobs.is_some() || policy.jobs_overridden {
             apply_concurrency_env(&mut cmd, policy.max_jobs);
         }
         let err = cmd.exec();

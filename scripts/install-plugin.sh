@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build (unless --no-build) and install the Mac Clamshell MCP binary, panel bundle, and Antigravity plugin manifests.
-# Usage: ./scripts/install-plugin.sh [--dest ~/.gemini/config/plugins/mac-clamshell-mcp] [--no-build]
+# Build (unless --no-build) and install the Clam Guard (mac-clamshell-mcp) binary, panel bundle, and Antigravity plugin manifests.
+# Usage: ./scripts/install-plugin.sh [--dest ~/.gemini/config/plugins/mac-clamshell-mcp] [--no-build] [--reload] [--no-reload]
 
 set -eu
 
@@ -8,6 +8,8 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 DEST="${MAC_CLAMSHELL_PLUGIN_DIR:-${ANTIGRAVITY_PLUGINS_DIR:-${HOME}/.gemini/config/plugins}/mac-clamshell-mcp}"
 DO_BUILD=1
+DO_RELOAD=0
+NO_RELOAD=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -23,8 +25,16 @@ while [ $# -gt 0 ]; do
       DO_BUILD=0
       shift
       ;;
+    --reload)
+      DO_RELOAD=1
+      shift
+      ;;
+    --no-reload)
+      NO_RELOAD=1
+      shift
+      ;;
     -h|--help)
-      printf 'Usage: %s [--dest DIR] [--no-build]\n' "$0"
+      printf 'Usage: %s [--dest DIR] [--no-build] [--reload] [--no-reload]\n' "$0"
       exit 0
       ;;
     *)
@@ -53,7 +63,7 @@ if [ ! -x "$BIN_SRC" ]; then
   exit 1
 fi
 if [ ! -f "$PANEL_SRC" ]; then
-  printf 'install-plugin: panel bundle missing at %s (run node panel/pack.mjs first)\n' "$PANEL_SRC" >&2
+  printf 'install-plugin: panel bundle missing at %s (run node panel/pack.ts first)\n' "$PANEL_SRC" >&2
   exit 1
 fi
 
@@ -87,4 +97,32 @@ cp "$PANEL_SRC" "${DEST}/panel/dist/panel.html"
 
 rm -f "${DEST}"/*.bak "${DEST}/bin/"*.new 2>/dev/null || true
 
-printf 'Installed Mac Clamshell MCP plugin cleanly to %s\n' "$DEST"
+reload_antigravity_mcp() {
+  if [ "$NO_RELOAD" -eq 1 ]; then
+    return 0
+  fi
+  if [ -n "${ANTIGRAVITY_CSRF_TOKEN:-}" ]; then
+    ls_addr="${ANTIGRAVITY_LS_ADDRESS:-localhost:5387}"
+    if curl -sf -H "Content-Type: application/json" \
+      -H "x-codeium-csrf-token: ${ANTIGRAVITY_CSRF_TOKEN}" \
+      -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
+      "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
+      printf 'Refreshed live Antigravity MCP server (close & reopen any open Clam Guard panel tab).\n'
+    else
+      printf 'Note: could not reach Antigravity RefreshMcpServers; restart Clam Guard in Customizations > Installed.\n'
+    fi
+  elif [ "$DO_RELOAD" -eq 1 ]; then
+    if command -v agy >/dev/null 2>&1; then
+      agy plugin disable mac-clamshell-mcp >/dev/null 2>&1 || true
+      agy plugin enable mac-clamshell-mcp >/dev/null 2>&1 || true
+      printf 'Reloaded Antigravity plugin mac-clamshell-mcp via agy CLI.\n'
+    else
+      printf 'Note: agy CLI not found on PATH; reload in Antigravity Customizations > Installed > Clam Guard > MCP > Restart.\n'
+    fi
+  else
+    printf 'Next: run "agy plugin disable mac-clamshell-mcp && agy plugin enable mac-clamshell-mcp" or restart in Antigravity Customizations > Installed.\n'
+  fi
+}
+
+printf 'Installed Clam Guard plugin cleanly to %s\n' "$DEST"
+reload_antigravity_mcp
