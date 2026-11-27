@@ -1,14 +1,16 @@
 #!/bin/sh
-# Install the Mac Clamshell MCP Antigravity plugin from GitHub Releases (macOS).
+# Install the Clam Guard (mac-clamshell-mcp) Antigravity plugin from GitHub Releases (macOS).
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
-#   ./scripts/install.sh [--version v1.0.0] [--dest /path/to/plugin-dir]
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall
+#   ./scripts/install.sh [--version v1.0.0] [--dest /path/to/plugin-dir] [--uninstall]
 
 set -eu
 
-REPO="eatingDream-antigravity-plugins/ClamGuard"
+REPO="eatingDream-antigravity-plugins/clam-guard"
 VERSION="${MAC_CLAMSHELL_VERSION:-}"
 DEST="${ANTIGRAVITY_PLUGINS_DIR:-${HOME}/.gemini/config/plugins}/mac-clamshell-mcp"
+UNINSTALL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,8 +30,12 @@ while [ $# -gt 0 ]; do
       DEST="$2"
       shift 2
       ;;
+    --uninstall)
+      UNINSTALL=1
+      shift
+      ;;
     -h|--help)
-      printf 'Usage: %s [--version vX.Y.Z] [--dest DIR]\n' "$0"
+      printf 'Usage: %s [--version vX.Y.Z] [--dest DIR] [--uninstall]\n' "$0"
       printf 'Env:   MAC_CLAMSHELL_VERSION, ANTIGRAVITY_PLUGINS_DIR\n'
       exit 0
       ;;
@@ -39,6 +45,25 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$UNINSTALL" -eq 1 ]; then
+  case "$DEST" in
+    ""|"/"|"$HOME"|"$HOME/")
+      printf 'install.sh: refusing to remove unsafe path: %s\n' "$DEST" >&2
+      exit 1
+      ;;
+  esac
+  if [ -x "${DEST}/bin/mac-clamshell-mcp" ]; then
+    "${DEST}/bin/mac-clamshell-mcp" guard uninstall >/dev/null 2>&1 || true
+  fi
+  if [ -d "$DEST" ]; then
+    rm -rf "$DEST"
+    printf 'Uninstalled Clam Guard (mac-clamshell-mcp) from %s\n' "$DEST"
+  else
+    printf 'Clam Guard (mac-clamshell-mcp) is not installed at %s\n' "$DEST"
+  fi
+  exit 0
+fi
 
 OS="$(uname -s)"
 if [ "$OS" != "Darwin" ]; then

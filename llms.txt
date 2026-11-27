@@ -1,4 +1,4 @@
-# ClamGuard (mac-clamshell-mcp)
+# Clam Guard (mac-clamshell-mcp)
 
 > Native Rust macOS MCP server, SEP-1865 side panel, CLI command wrapper, read-only AppleSMC fan telemetry (separating fan-control apps from monitors and reporting explicit SMC mode), external-display-safe closed-lid guard, adaptive build throttling, safe brightness control, and session-checked screen locking without sleeping background jobs. Homepage: https://clamguard.eatingdream.dev
 
@@ -13,7 +13,7 @@
 
 Install the prebuilt macOS binary (Apple Silicon & Intel):
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
 ```
 
 Generic stdio MCP configuration (`mcpServers`):

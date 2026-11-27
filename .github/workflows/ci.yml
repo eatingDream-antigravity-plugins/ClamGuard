@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   rust-and-panel:
@@ -35,6 +35,7 @@ jobs:
           node panel/pack.mjs
           git diff --exit-code -- panel/dist/panel.html
           node --test panel/test/panel.test.mjs
+          sh -n scripts/install.sh
 
   secrets-scan:
     name: Secret scan (gitleaks) + sanitization guard

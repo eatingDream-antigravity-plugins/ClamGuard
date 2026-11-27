@@ -30,7 +30,7 @@ let fails = 0, off = false, bnrX = false, bnrE = null, canTools = false, autoWan
 
 const num = (v, d = 0) => (Number.isFinite(+v) ? +v : d), qa = (s) => root?.querySelectorAll?.(s) || [], q1 = (s) => root?.querySelector?.(s);
 const ga = (e, k) => e?.getAttribute?.(k) ?? null, sa = (e, k, v) => { const s = String(v); if (e && e.getAttribute(k) !== s) e.setAttribute(k, s); };
-const app = new App({ name: "ClamGuard", version: ga(doc.querySelector?.('meta[name="app-version"]'), "content") || "1.4.0" }, {});
+const app = new App({ name: "Clam Guard", version: ga(doc.querySelector?.('meta[name="app-version"]'), "content") || "1.4.0" }, {});
 const tx = (e, v) => { const el = typeof e === "string" ? $(e) : e, s = String(v ?? ""); if (el && el.textContent !== s) el.textContent = s; };
 const vis = (e, on) => { const el = typeof e === "string" ? $(e) : e; if (el && el.hidden !== !on) el.hidden = !on; };
 const dis = (id, v) => { const e = $(id); if (e) e.disabled = v; }, on = (t, ev, fn) => t?.addEventListener(ev, fn);

@@ -1,37 +1,43 @@
 <div align="center">
 
-<img src="assets/logo.svg" alt="ClamGuard" width="80" height="80">
+<img src="assets/logo.svg" alt="Clam Guard" width="76" height="76">
 
-# ClamGuard (mac-clamshell-mcp)
+# Clam Guard (`mac-clamshell-mcp`)
 
-**Keep your closed MacBook cool, quiet, and predictable when running builds or AI agents.**
+**Keep your closed MacBook cool, quiet, and safe while builds or AI coding agents run in the background.**
 
-[Homepage](https://clamguard.eatingdream.dev) · English | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
+[Homepage](https://clamguard.eatingdream.dev) · **English** | [简体中文](README.zh-CN.md) · [Releases](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases) · [AI Guide](docs/ai-guide.md) · [`llms.txt`](llms.txt)
 
-[![CI](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/actions/workflows/ci.yml)
-[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/ClamGuard/releases)
+[![CI](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/actions/workflows/ci.yml)
+[![Release](assets/release-badge.svg)](https://github.com/eatingDream-antigravity-plugins/clam-guard/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-1A1916?logo=rust&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%7C%20Intel-1A1916?logo=apple&logoColor=white)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-1A1916)](LICENSE)
 
-<img src="docs/social-preview.png" alt="ClamGuard panel preview" width="860">
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/clamguard-dashboard-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/clamguard-dashboard-light.png">
+  <img src="docs/images/clamguard-dashboard-dark.png" alt="Clam Guard live dashboard showing lid state, power, thermal pressure, built-in brightness controls, throttling mode, and read-only fan telemetry" width="640">
+</picture>
 
 </div>
 
-## What It Is
+## Is It For You?
 
-A native Rust macOS MCP server, SEP-1865 live dashboard, and CLI wrapper that watches lid, power, and thermal pressure to throttle heavy commands and guard closed-lid display state.
+- **Yes, if** you leave a MacBook closed while AI agents, compiles, or test suites keep running—and want automatic thermal throttling, closed-lid display protection, and instant brightness or lock controls without `sudo`.
+- **No, if** you want a custom fan-curve writer, kernel extension, or global sleep blocker—Clam Guard never touches fan curves or requires administrator privileges.
 
-It is **not** a fan-curve writer, kernel extension, or global `pmset` modifier—it never requires `sudo` and leaves other apps and fan managers untouched.
+## What You Get
 
-## Features
-
-- **Closed-lid display guard (external-display safe)**: Without external monitors, puts the display to sleep (`pmset displaysleepnow`) on lid close and restores your saved brightness on open. When docked with external monitors, preserves external displays without triggering `displaysleepnow`, relies on macOS clamshell handling for the internal panel, and reports `lidClosed`, `internalOffline`, and `confirmedAsleep` separately while keeping wake-restore targets synced.
-- **Automatic build throttling**: Adapts CPU QoS (`taskpolicy`, `nice`) and parallel job caps (`normal`, `utility`, `eco`, `strict`) from live lid, battery/AC, and macOS thermal pressure (Apple Silicon & Intel).
-- **Silent when open and cool**: Emits zero hook noise while open under nominal thermals; only nudges the agent to wrap heavy builds when throttled.
-- **Read-only AppleSMC fan telemetry**: Reads live fan RPM and SMC control mode (`auto`, `manual`, or `unknown`) with zero SMC writes. Separately detects dedicated fan-control apps (`Macs Fan Control`, `TG Pro`, `smcFanControl`) and read-only monitors (`Fanny`, `Stats`, `iStat Menus`) without guessing a controller when SMC mode is unknown.
-- **Live bilingual panel & brightness control**: Inspect telemetry in Antigravity (`EN / 中文`), toggle guard or mode override, and adjust built-in brightness (or safely queue the wake-restore target while closed).
-- **Screen lock with session verification**: Locks without sleeping background tasks (`SACLockScreenImmediate`, with `CGSession` and `pmset` fallbacks), polls macOS `CGSSessionScreenIsLocked`, and explicitly reports `verified` vs `submitted` (`pmset` fails unless session lock is verified).
+| | |
+| :--- | :--- |
+| **Cooler closed-lid builds** | Automatically caps CPU priority and parallel jobs based on lid state, AC vs. battery, and macOS thermal pressure—and stays completely silent when your Mac is open and cool. |
+| **External-display-safe lid guard** | Puts the built-in display to sleep when you close the lid undocked and restores your brightness when you open it; stays out of the way of external monitors when docked. |
+| **Safe brightness & one-click lock** | Adjust built-in display brightness from the panel or agent (queued safely while closed so the panel never wakes in a bag) and lock the screen without pausing background tasks. |
+| **Read-only fan visibility** | See live fan RPM and whether macOS or a fan app (`Macs Fan Control`, `TG Pro`, `smcFanControl`) is in charge—with zero SMC writes. |
+| **Native Rust, zero `sudo`** | Single local binary for Apple Silicon and Intel Macs with zero outbound network calls and owner-only (`0600`) local settings. |
 
 | Profile | Trigger | Effect |
 | :--- | :--- | :--- |
@@ -42,48 +48,46 @@ It is **not** a fan-curve writer, kernel extension, or global `pmset` modifier�
 
 ## Quick Start
 
-Requires macOS (Apple Silicon or Intel). Downloads the verified release binary and installs the Antigravity plugin:
-
 ```sh
-curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/ClamGuard/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh
 ```
 
-Or run directly from your terminal:
+<sub>Verifies the release archive SHA-256 automatically · Supports macOS (Apple Silicon & Intel) · Pin a tag with `MAC_CLAMSHELL_VERSION=vX.Y.Z` · Remove cleanly anytime with `curl -fsSL https://raw.githubusercontent.com/eatingDream-antigravity-plugins/clam-guard/main/scripts/install.sh | sh -s -- --uninstall`.</sub>
+
+Reload Antigravity to open **Clam Guard**, or run directly in your terminal:
 
 ```sh
 mac-clamshell-mcp status
 mac-clamshell-mcp run -- cargo test
-mac-clamshell-mcp guard install --interval 10   # Optional 24/7 LaunchAgent
+mac-clamshell-mcp guard install --interval 10   # Optional 24/7 background guard
 ```
 
 ## For AI Agents
 
-Point Claude Code, Codex, Cursor, OpenCode, or Antigravity to the portable skill and AI guide—all CLI flags, MCP schemas, and throttling profiles live there:
+Install the portable skill for Antigravity, Claude Code, Codex, Cursor, or OpenCode:
 
 ```sh
-npx skills add eatingDream-antigravity-plugins/ClamGuard
+npx skills add eatingDream-antigravity-plugins/clam-guard
 ```
 
-> Tell your agent: *"Read [`llms.txt`](llms.txt) and [`docs/ai-guide.md`](docs/ai-guide.md) to configure `mac-clamshell-mcp` stdio MCP and wrap heavy builds automatically when throttled."*
+> **Agent hint**: Read [`llms.txt`](llms.txt), [`skills/mac-clamshell/SKILL.md`](skills/mac-clamshell/SKILL.md), and [`docs/ai-guide.md`](docs/ai-guide.md) for MCP tool schemas, CLI flags, throttling rules, and LaunchAgent commands.
 
 ## Safety & Privacy
 
-- **Zero outbound network traffic**: The binary makes no network calls and collects no analytics.
-- **Local stdio telemetry scope**: Over local MCP stdio, tool responses share host status with your connected MCP client—including hostname, chip/macOS version, CPU/memory/fan/display telemetry, and abbreviated local paths (`~/...`) for settings and binary location.
-- **Zero root & zero SMC writes**: Never needs `sudo`, never writes SMC/NVRAM/kexts, and stores local state under owner-only (`0700`/`0600`) permissions.
-- **Reversible user-space brightness**: Uses macOS `DisplayServices` user-space APIs and refuses to write brightness unless hardware confirms the lid is open and the internal panel is awake.
+- **Zero network & zero `sudo`**: Makes no outbound network calls, collects no analytics, and never writes SMC, NVRAM, or kernel extensions.
+- **Reversible user-space controls**: Never changes brightness unless hardware confirms the lid is open and the internal display is awake.
+- **Transparent local telemetry**: Over local MCP stdio, shares host status (lid, battery, thermal pressure, fan RPM, load, memory, and `~/...` paths) only with your connected local client.
 
 ## Documentation
 
-- [AI Agent Guide & Reference (`docs/ai-guide.md`)](docs/ai-guide.md) — MCP tools, CLI flags, throttle tiers, and LaunchAgent workflows
-- [Portable Agent Skill (`skills/mac-clamshell/SKILL.md`)](skills/mac-clamshell/SKILL.md)
-- [LLM Index (`llms.txt`)](llms.txt) · [Contributor Guide (`AGENTS.md`)](AGENTS.md)
-- [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
+- [AI Agent Guide & Reference](docs/ai-guide.md) — MCP tools, CLI flags, throttle matrix, display & fan semantics, source build
+- [Portable Agent Skill (`SKILL.md`)](skills/mac-clamshell/SKILL.md) · [LLM Index (`llms.txt`)](llms.txt)
+- [Contributor Guide](AGENTS.md) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
 ## Antigravity Plugin Suite
 
-Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [ContextRadar](https://github.com/eatingDream-antigravity-plugins/ContextRadar) (`context-radar-mcp`) · **ClamGuard** (`mac-clamshell-mcp`) · [RemoteCast](https://github.com/eatingDream-antigravity-plugins/RemoteCast) (`chrome-stream-mcp`) · [ColabDeck](https://github.com/eatingDream-antigravity-plugins/ColabDeck) (`colab-mcp`) — powered by [PanelKit](https://github.com/eatingDream-antigravity-plugins/PanelKit) (`agy-mcp-kit`).
+Part of the [eatingDream Antigravity Plugin Suite](https://eatingdream.dev): [Context Radar](https://github.com/eatingDream-antigravity-plugins/context-radar) (`context-radar-mcp`) · **Clam Guard** (`mac-clamshell-mcp`) · [Remote Cast](https://github.com/eatingDream-antigravity-plugins/remote-cast) (`chrome-stream-mcp`) · [Colab Deck](https://github.com/eatingDream-antigravity-plugins/colab-deck) (`colab-mcp`) — powered by [Panel Kit](https://github.com/eatingDream-antigravity-plugins/panel-kit) (`agy-mcp-kit`).
 
 ## License
 
-[MIT](LICENSE)
+Licensed under the [MIT License](LICENSE).

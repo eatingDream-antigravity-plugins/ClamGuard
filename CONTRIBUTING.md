@@ -1,6 +1,6 @@
 # Contributing
 
-Contributions to [mac-clamshell-mcp](https://github.com/eatingDream-antigravity-plugins/ClamGuard) are welcome.
+Contributions to [Clam Guard (mac-clamshell-mcp)](https://github.com/eatingDream-antigravity-plugins/clam-guard) are welcome.
 
 ## Workflow
 

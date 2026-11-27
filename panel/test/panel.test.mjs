@@ -422,6 +422,8 @@ describe("Mac Clamshell Panel: Adaptive Polling, Brightness Coalescing, Fan Owne
     assert.ok(!html.includes('id="biv"'), "duplicate brightness #biv must be removed");
     const headerMatch = html.match(/<header class="hd">[\s\S]*?<\/header>/i);
     assert.ok(headerMatch, "missing .hd header");
+    assert.ok(html.includes("<title>Clam Guard</title>"), "panel.html must use spaced Title Case title");
+    assert.ok(headerMatch[0].includes("Clam Guard"), "panel header must use spaced Title Case wordmark");
     assert.ok(!headerMatch[0].includes('id="lock-btn"'), "Lock Screen must be in Display card footer, not header");
     assert.ok(html.includes('id="lock-btn"'), "missing #lock-btn in Display card footer");
     assert.ok(html.includes('id="fan-card"') && html.includes('id="bnr"') && html.includes('class="card hero fl"'), "missing hero, banner, or fan card");
