@@ -1,0 +1,37 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  poem: false
+  collapse_walkthrough: true
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_title_keywords:
+      - "chore(main): release"
+  path_filters:
+    - "!CHANGELOG.md"
+    - "!**/package-lock.json"
+    - "!Cargo.lock"
+    - "!**/panel/dist/panel.html"
+    - "!docs/screenshots/**"
+    - "!assets/*.png"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        - Enforce `clippy` (`-D warnings`) cleanliness, fail-closed state/lockfile handling, and compile-time test guards blocking live macOS display, power, or LaunchAgent mutations in tests.
+        - Verify closed-lid guard invariants (never light the built-in display while the lid is closed), silent `{}` hooks under normal profile, and <= 64-char MCP tool IDs.
+        - Check that macOS FFI wrappers validate null pointers and return codes safely and zero local paths or tokens leak into source or binaries.
+    - path: "tests/**/*.rs"
+      instructions: |
+        - Verify tests stay offline and deterministic with compile-time test guards and no live hardware or LaunchAgent side effects.
+    - path: "panel/**/*.{ts,css}"
+      instructions: |
+        - Enforce strict erasable TypeScript, `default-src 'none'` CSP compliance, no `innerHTML` or untrusted DOM injection, `panel/dist/panel.html` staying <= 64 KiB, and EN+ZH i18n parity.
+    - path: "{plugin/**,skills/**,scripts/**}"
+      instructions: |
+        - Verify `plugin/rules/AGENTS.md` stays plain markdown <= 400 B, `skills/mac-clamshell/SKILL.md` remains the canonical skill source, and shell scripts pass `sh -n`.
