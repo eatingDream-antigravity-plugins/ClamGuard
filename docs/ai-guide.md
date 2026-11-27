@@ -1,6 +1,6 @@
-# ClamGuard (mac-clamshell-mcp) — AI Agent Guide & Operational Reference
+# Clam Guard (mac-clamshell-mcp) — AI Agent Guide & Operational Reference
 
-Complete operational reference for AI coding agents and advanced users configuring **ClamGuard** (`mac-clamshell-mcp`). Homepage: <https://clamguard.eatingdream.dev> · Human overview: [README.md](../README.md) | [README.zh-CN.md](../README.zh-CN.md).
+Complete operational reference for AI coding agents and advanced users configuring **Clam Guard** (`mac-clamshell-mcp`). Homepage: <https://clamguard.eatingdream.dev> · Human overview: [README.md](../README.md) | [README.zh-CN.md](../README.zh-CN.md).
 
 ## Throttling Profile Matrix
 
@@ -67,8 +67,8 @@ Note on `--lid-state`: `--lid-state closed` forces a safe deferred write (`saved
 Requires macOS, Rust (`cargo`), and Node.js 20+:
 
 ```sh
-git clone https://github.com/eatingDream-antigravity-plugins/ClamGuard.git
-cd ClamGuard
+git clone https://github.com/eatingDream-antigravity-plugins/clam-guard.git
+cd clam-guard
 (cd panel && npm ci --ignore-scripts) && node panel/pack.mjs && node --test panel/test/panel.test.mjs
 cargo test --locked && ./scripts/install-plugin.sh
 ```
