@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.1](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.5.0...v1.5.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* harden installers, launchagent permissions, bounded file reads, RPC batching, mock gating, and CI ([#32](https://github.com/eatingDream-antigravity-plugins/clam-guard/issues/32)) ([11eb8f6](https://github.com/eatingDream-antigravity-plugins/clam-guard/commit/11eb8f6114aeaeedd6a335fd183fcb2b6a25bab2))
+
 ## [1.5.0](https://github.com/eatingDream-antigravity-plugins/clam-guard/compare/v1.4.3...v1.5.0) (2026-11-27)
 
 
