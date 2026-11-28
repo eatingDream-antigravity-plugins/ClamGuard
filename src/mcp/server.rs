@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub const DEFAULT_SERVE_GUARD_INTERVAL_MS: u64 = 5_000;
 pub const MAX_STDIN_LINE_BYTES: usize = 1024 * 1024;
+pub const MAX_JSONRPC_BATCH_LEN: usize = 32;
 
 pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
     &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
@@ -213,6 +214,12 @@ fn handle_single_rpc<P: ProbeBackend + 'static, D: DisplayBackend + 'static>(
         }
         "tools/list" => Some(ok(list_tools_json(session.apps_capable))),
         "tools/call" => {
+            if !session.initialized {
+                return Some(err(
+                    -32600,
+                    "Invalid Request: session not initialized".to_string(),
+                ));
+            }
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if !is_tool_allowed(name, session.apps_capable) {
                 return Some(err(
@@ -246,6 +253,17 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
         if batch.is_empty() {
             return Some(invalid_request_err("Invalid Request: empty batch"));
         }
+        if !session.supports_jsonrpc_batch() {
+            return Some(invalid_request_err(format!(
+                "Invalid Request: JSON-RPC batching is not supported in MCP {}",
+                session.protocol_version
+            )));
+        }
+        if batch.len() > MAX_JSONRPC_BATCH_LEN {
+            return Some(invalid_request_err(format!(
+                "Invalid Request: JSON-RPC batch exceeds maximum length of {MAX_JSONRPC_BATCH_LEN}"
+            )));
+        }
         let contains_initialize = batch.iter().any(|item| {
             item.as_object()
                 .and_then(|o| o.get("method"))
@@ -256,12 +274,6 @@ pub fn handle_rpc_value_with_session<P: ProbeBackend + 'static, D: DisplayBacken
             return Some(invalid_request_err(
                 "Invalid Request: initialize cannot be sent in a JSON-RPC batch",
             ));
-        }
-        if !session.supports_jsonrpc_batch() {
-            return Some(invalid_request_err(format!(
-                "Invalid Request: JSON-RPC batching is not supported in MCP {}",
-                session.protocol_version
-            )));
         }
         let responses: Vec<Value> = batch
             .iter()
@@ -782,6 +794,43 @@ mod tests {
             read_bounded_line(&mut cursor, &mut buf, 8).unwrap(),
             LineRead::Eof
         );
+
+        // Uninitialized session MUST reject tools/call with -32600
+        let mut uninit = McpSession::default();
+        for tool in [
+            "clamshell_panel",
+            "clamshell_set_brightness",
+            "clamshell_lock_screen",
+        ] {
+            let uninit_resp = handle_rpc_value_with_session(
+                &json!({"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": tool, "arguments": {}}}),
+                &mut uninit,
+                &engine,
+                &html,
+            )
+            .unwrap();
+            assert_eq!(uninit_resp["error"]["code"], -32600);
+        }
+
+        // Legacy batch arrays are capped at MAX_JSONRPC_BATCH_LEN (32 ok, 33 -> -32600)
+        let ok_batch: Vec<Value> = (0..MAX_JSONRPC_BATCH_LEN)
+            .map(|i| json!({"jsonrpc": "2.0", "id": i, "method": "ping"}))
+            .collect();
+        let ok_batch_resp =
+            handle_rpc_value_with_session(&Value::Array(ok_batch), &mut legacy, &engine, &html)
+                .unwrap();
+        assert_eq!(
+            ok_batch_resp.as_array().unwrap().len(),
+            MAX_JSONRPC_BATCH_LEN
+        );
+
+        let too_many: Vec<Value> = (0..=MAX_JSONRPC_BATCH_LEN)
+            .map(|i| json!({"jsonrpc": "2.0", "id": i, "method": "ping"}))
+            .collect();
+        let too_many_resp =
+            handle_rpc_value_with_session(&Value::Array(too_many), &mut legacy, &engine, &html)
+                .unwrap();
+        assert_eq!(too_many_resp["error"]["code"], -32600);
     }
 
     #[test]

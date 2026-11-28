@@ -92,7 +92,9 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --all-targets --features test-mocks -- -D warnings
           cargo test --locked
+          cargo test --locked --features test-mocks
       - name: Build, verify, and stage macOS tarballs
         run: |
           OUT="${RUNNER_TEMP}/artifacts-macos"

@@ -12,6 +12,9 @@ categories = ["command-line-utilities", "os::macos-apis"]
 name = "mac-clamshell-mcp"
 path = "src/main.rs"
 
+[features]
+test-mocks = []
+
 [dependencies]
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

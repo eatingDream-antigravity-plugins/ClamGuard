@@ -3,8 +3,9 @@ use crate::platform::macos::run_cmd_exit_code;
 #[cfg(target_os = "macos")]
 use crate::platform::macos::run_cmd_timeout;
 use crate::state::{
-    abbreviate_home, atomic_write, ensure_private_dir, load_guard_state_opt, read_settings,
-    DisplayGuardSummary,
+    abbreviate_home, atomic_write_in_owned_dir, ensure_owned_dir, ensure_private_dir,
+    load_guard_state_opt, read_bounded_regular_file, read_settings, DisplayGuardSummary,
+    MAX_PLIST_FILE_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -40,7 +41,8 @@ pub fn launchagents_dir() -> PathBuf {
             return PathBuf::from(home).join("Library").join("LaunchAgents");
         }
     }
-    std::env::temp_dir().join("LaunchAgents")
+    let uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("LaunchAgents-{uid}"))
 }
 
 pub fn plist_path() -> PathBuf {
@@ -48,7 +50,8 @@ pub fn plist_path() -> PathBuf {
 }
 
 pub fn plist_exists() -> bool {
-    plist_path().is_file()
+    fs::symlink_metadata(plist_path())
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
 }
 
 fn xml_escape(raw: &str) -> String {
@@ -97,11 +100,15 @@ fn parse_plist_fields(xml: &str) -> (Option<u64>, Option<String>) {
 }
 
 fn skip_launchctl() -> bool {
-    std::env::var("MAC_CLAMSHELL_SKIP_LAUNCHCTL")
+    #[cfg(any(test, feature = "test-mocks"))]
+    if std::env::var("MAC_CLAMSHELL_SKIP_LAUNCHCTL")
         .ok()
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
         .unwrap_or(false)
-        || !cfg!(target_os = "macos")
+    {
+        return true;
+    }
+    !cfg!(target_os = "macos")
 }
 
 #[cfg(all(target_os = "macos", not(test)))]
@@ -110,6 +117,7 @@ fn current_uid() -> u32 {
 }
 
 fn is_launchctl_loaded() -> bool {
+    #[cfg(any(test, feature = "test-mocks"))]
     if let Ok(mock) = std::env::var("MAC_CLAMSHELL_MOCK_LAUNCHCTL") {
         return matches!(
             mock.trim().to_ascii_lowercase().as_str(),
@@ -138,9 +146,10 @@ pub fn is_launchagent_active() -> bool {
 pub fn guard_service_status(data_dir: &Path) -> GuardServiceStatus {
     let settings = read_settings(data_dir);
     let p_path = plist_path();
-    let plist_installed = p_path.is_file();
+    let plist_installed = fs::symlink_metadata(&p_path)
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file());
     let (interval_secs, binary_path) = if plist_installed {
-        fs::read_to_string(&p_path)
+        read_bounded_regular_file(&p_path, MAX_PLIST_FILE_BYTES)
             .ok()
             .map(|s| parse_plist_fields(&s))
             .unwrap_or((None, None))
@@ -249,12 +258,12 @@ pub fn install_launchagent(
     ensure_private_dir(&log_dir).map_err(|e| format!("failed to create log dir: {e}"))?;
 
     let agents_dir = launchagents_dir();
-    fs::create_dir_all(&agents_dir)
-        .map_err(|e| format!("failed to create {}: {e}", agents_dir.display()))?;
+    ensure_owned_dir(&agents_dir)
+        .map_err(|e| format!("failed to prepare {}: {e}", agents_dir.display()))?;
 
     let p_path = plist_path();
     let xml = render_launchagent_plist(&bin_path, data_dir, interval_secs);
-    atomic_write(&p_path, xml.as_bytes())
+    atomic_write_in_owned_dir(&p_path, xml.as_bytes())
         .map_err(|e| format!("failed to write {}: {e}", p_path.display()))?;
 
     #[cfg(target_os = "macos")]
@@ -372,6 +381,7 @@ fn uninstall_verified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::atomic_write;
 
     #[test]
     fn uninstall_verifies_launchd_even_on_bootout_failure() {
@@ -427,5 +437,30 @@ mod tests {
             let uninstall_err = uninstall_launchagent(&dir).unwrap_err();
             assert!(uninstall_err.contains("#[cfg(test)]"));
         }
+    }
+
+    #[test]
+    fn plist_write_preserves_launchagents_dir_mode_while_writing_0600_plist() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("clamshell-plist-perms-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let agents = dir.join("LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::set_permissions(&agents, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let p_path = agents.join(format!("{LAUNCHAGENT_LABEL}.plist"));
+        let xml = render_launchagent_plist(Path::new("/usr/bin/true"), &dir, 10);
+        atomic_write_in_owned_dir(&p_path, xml.as_bytes()).unwrap();
+
+        assert_eq!(
+            fs::metadata(&agents).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&p_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

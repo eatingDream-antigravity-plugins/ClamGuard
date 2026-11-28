@@ -129,6 +129,17 @@ case "$VERSION" in
   *) VERSION="v${VERSION}" ;;
 esac
 
+case "$VERSION" in
+  ''|*[!0-9A-Za-z.-]*)
+    printf 'install.sh: invalid version tag: %s\n' "$VERSION" >&2
+    exit 1
+    ;;
+esac
+if ! printf '%s\n' "$VERSION" | LC_ALL=C grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+  printf 'install.sh: invalid version tag format: %s (expected vX.Y.Z)\n' "$VERSION" >&2
+  exit 1
+fi
+
 ARCHIVE="mac-clamshell-mcp-${VERSION}-${TARGET}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${VERSION}"
 
@@ -139,9 +150,15 @@ printf 'Downloading %s (%s)...\n' "$ARCHIVE" "$VERSION"
 curl -fsSL -o "${TMPDIR_WORK}/${ARCHIVE}" "${BASE_URL}/${ARCHIVE}"
 curl -fsSL -o "${TMPDIR_WORK}/${ARCHIVE}.sha256" "${BASE_URL}/${ARCHIVE}.sha256"
 
-EXPECTED_SHA="$(awk '{print $1}' "${TMPDIR_WORK}/${ARCHIVE}.sha256" | head -n 1)"
-if [ -z "$EXPECTED_SHA" ]; then
-  printf 'install.sh: empty SHA-256 checksum file\n' >&2
+EXPECTED_SHA="$(awk '{print $1}' "${TMPDIR_WORK}/${ARCHIVE}.sha256" | head -n 1 | tr '[:upper:]' '[:lower:]')"
+case "$EXPECTED_SHA" in
+  ''|*[!0-9a-f]*)
+    printf 'install.sh: invalid SHA-256 checksum format\n' >&2
+    exit 1
+    ;;
+esac
+if ! printf '%s\n' "$EXPECTED_SHA" | LC_ALL=C grep -Eq '^[0-9a-f]{64}$'; then
+  printf 'install.sh: invalid SHA-256 checksum length\n' >&2
   exit 1
 fi
 
@@ -163,35 +180,54 @@ STAGE="${TMPDIR_WORK}/extract"
 mkdir -p "$STAGE"
 tar -xzf "${TMPDIR_WORK}/${ARCHIVE}" -C "$STAGE"
 
-if [ ! -f "${STAGE}/bin/mac-clamshell-mcp" ] || [ ! -f "${STAGE}/plugin.json" ]; then
+if [ -n "$(find "$STAGE" -type l 2>/dev/null)" ]; then
+  printf 'install.sh: refusing archive containing symlinks\n' >&2
+  exit 1
+fi
+
+if [ ! -f "${STAGE}/bin/mac-clamshell-mcp" ] || [ -L "${STAGE}/bin/mac-clamshell-mcp" ] || [ ! -f "${STAGE}/plugin.json" ] || [ -L "${STAGE}/plugin.json" ]; then
   printf 'install.sh: archive is missing required plugin files\n' >&2
   exit 1
 fi
 
+copy_staged_file() {
+  src="$1"
+  dst="$2"
+  if [ -L "$src" ] || [ ! -f "$src" ]; then
+    printf 'install.sh: refusing unsafe staged file: %s\n' "$src" >&2
+    exit 1
+  fi
+  if [ -L "$dst" ]; then
+    printf 'install.sh: refusing symlink destination: %s\n' "$dst" >&2
+    exit 1
+  fi
+  cp "$src" "$dst"
+}
+
 mkdir -p "${DEST}/bin" "${DEST}/scripts" "${DEST}/panel/dist" "${DEST}/rules" "${DEST}/skills/mac-clamshell" "${DEST}/assets" "${DEST}/docs"
 
 # Atomic binary swap so a running MCP server never sees a truncated executable
-cp "${STAGE}/bin/mac-clamshell-mcp" "${DEST}/bin/mac-clamshell-mcp.new"
+copy_staged_file "${STAGE}/bin/mac-clamshell-mcp" "${DEST}/bin/mac-clamshell-mcp.new"
 chmod 0755 "${DEST}/bin/mac-clamshell-mcp.new"
 mv -f "${DEST}/bin/mac-clamshell-mcp.new" "${DEST}/bin/mac-clamshell-mcp"
 
 if [ -f "${STAGE}/scripts/install-launchagent.sh" ]; then
-  cp "${STAGE}/scripts/install-launchagent.sh" "${DEST}/scripts/install-launchagent.sh"
+  copy_staged_file "${STAGE}/scripts/install-launchagent.sh" "${DEST}/scripts/install-launchagent.sh"
   chmod 0755 "${DEST}/scripts/install-launchagent.sh"
 fi
 
-cp "${STAGE}/panel/dist/panel.html" "${DEST}/panel/dist/panel.html"
-cp "${STAGE}/plugin.json" "${DEST}/plugin.json"
-cp "${STAGE}/mcp_config.json" "${DEST}/mcp_config.json"
-cp "${STAGE}/hooks.json" "${DEST}/hooks.json"
-cp "${STAGE}/rules/AGENTS.md" "${DEST}/rules/AGENTS.md"
-cp "${STAGE}/skills/mac-clamshell/SKILL.md" "${DEST}/skills/mac-clamshell/SKILL.md"
-cp "${STAGE}/assets/logo.svg" "${DEST}/assets/logo.svg"
-[ -f "${STAGE}/docs/ai-guide.md" ] && cp "${STAGE}/docs/ai-guide.md" "${DEST}/docs/ai-guide.md"
-[ -f "${STAGE}/llms.txt" ] && cp "${STAGE}/llms.txt" "${DEST}/llms.txt"
-[ -f "${STAGE}/LICENSE" ] && cp "${STAGE}/LICENSE" "${DEST}/LICENSE"
-[ -f "${STAGE}/README.md" ] && cp "${STAGE}/README.md" "${DEST}/README.md"
-[ -f "${STAGE}/README.zh-CN.md" ] && cp "${STAGE}/README.zh-CN.md" "${DEST}/README.zh-CN.md"
+copy_staged_file "${STAGE}/panel/dist/panel.html" "${DEST}/panel/dist/panel.html"
+copy_staged_file "${STAGE}/plugin.json" "${DEST}/plugin.json"
+copy_staged_file "${STAGE}/mcp_config.json" "${DEST}/mcp_config.json"
+copy_staged_file "${STAGE}/hooks.json" "${DEST}/hooks.json"
+copy_staged_file "${STAGE}/rules/AGENTS.md" "${DEST}/rules/AGENTS.md"
+copy_staged_file "${STAGE}/skills/mac-clamshell/SKILL.md" "${DEST}/skills/mac-clamshell/SKILL.md"
+copy_staged_file "${STAGE}/assets/logo.svg" "${DEST}/assets/logo.svg"
+[ -f "${STAGE}/docs/ai-guide.md" ] && copy_staged_file "${STAGE}/docs/ai-guide.md" "${DEST}/docs/ai-guide.md"
+[ -f "${STAGE}/llms.txt" ] && copy_staged_file "${STAGE}/llms.txt" "${DEST}/llms.txt"
+[ -f "${STAGE}/LICENSE" ] && copy_staged_file "${STAGE}/LICENSE" "${DEST}/LICENSE"
+[ -f "${STAGE}/README.md" ] && copy_staged_file "${STAGE}/README.md" "${DEST}/README.md"
+[ -f "${STAGE}/README.zh-CN.md" ] && copy_staged_file "${STAGE}/README.zh-CN.md" "${DEST}/README.zh-CN.md"
 
 reload_antigravity_mcp() {
   if [ "$NO_RELOAD" -eq 1 ]; then
@@ -199,10 +235,22 @@ reload_antigravity_mcp() {
   fi
   if [ -n "${ANTIGRAVITY_CSRF_TOKEN:-}" ]; then
     ls_addr="${ANTIGRAVITY_LS_ADDRESS:-localhost:5387}"
-    if curl -sf -H "Content-Type: application/json" \
-      -H "x-codeium-csrf-token: ${ANTIGRAVITY_CSRF_TOKEN}" \
-      -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
-      "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
+    clean_addr="$(printf '%s' "$ls_addr" | LC_ALL=C tr -d '[:cntrl:]')"
+    if [ "$clean_addr" != "$ls_addr" ] || \
+      ! printf '%s\n' "$ls_addr" | LC_ALL=C grep -Eq '^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$'; then
+      printf 'Note: ignoring non-loopback ANTIGRAVITY_LS_ADDRESS; restart Clam Guard in Customizations > Installed.\n'
+      return 0
+    fi
+    clean_token="$(printf '%s' "$ANTIGRAVITY_CSRF_TOKEN" | LC_ALL=C tr -d '\000-\037\177\"\\')"
+    if [ "$clean_token" != "$ANTIGRAVITY_CSRF_TOKEN" ]; then
+      printf 'Note: ignoring malformed ANTIGRAVITY_CSRF_TOKEN; restart Clam Guard in Customizations > Installed.\n'
+      return 0
+    fi
+    if printf 'header = "Content-Type: application/json"\nheader = "x-codeium-csrf-token: %s"\n' \
+        "$ANTIGRAVITY_CSRF_TOKEN" | \
+      curl -sf --connect-timeout 2 --max-time 5 -K - \
+        -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
+        "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
       printf 'Refreshed live Antigravity MCP server (close & reopen any open Clam Guard panel tab).\n'
     else
       printf 'Note: could not reach Antigravity RefreshMcpServers; restart Clam Guard in Customizations > Installed.\n'

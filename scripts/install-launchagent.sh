@@ -76,19 +76,47 @@ if [ ! -x "$BIN_PATH" ]; then
 fi
 
 case "${BIN_PATH}${DATA_DIR}" in
-  *'<'*|*'>'*|*'&'*|*'"'*)
+  *'<'*|*'>'*|*'&'*|*'"'*|*"'"*)
     printf 'install-launchagent: paths must not contain XML special characters\n' >&2
     exit 2
     ;;
 esac
+CLEAN_PATHS="$(printf '%s' "${BIN_PATH}${DATA_DIR}" | LC_ALL=C tr -d '[:cntrl:]')"
+if [ "$CLEAN_PATHS" != "${BIN_PATH}${DATA_DIR}" ]; then
+  printf 'install-launchagent: paths must not contain control or newline characters\n' >&2
+  exit 2
+fi
 
 AGENTS_DIR="${HOME}/Library/LaunchAgents"
 LOG_DIR="${DATA_DIR}/logs"
 PLIST_PATH="${AGENTS_DIR}/${LABEL}.plist"
-mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+
+if [ -L "$AGENTS_DIR" ]; then
+  printf 'install-launchagent: refusing symlink directory: %s\n' "$AGENTS_DIR" >&2
+  exit 1
+fi
+if [ -L "$DATA_DIR" ] || [ -L "$LOG_DIR" ]; then
+  printf 'install-launchagent: refusing symlink data/log directory\n' >&2
+  exit 1
+fi
+if [ -L "$PLIST_PATH" ]; then
+  printf 'install-launchagent: refusing symlink plist target: %s\n' "$PLIST_PATH" >&2
+  exit 1
+fi
+if [ -e "$PLIST_PATH" ] && [ ! -f "$PLIST_PATH" ]; then
+  printf 'install-launchagent: refusing non-regular plist target: %s\n' "$PLIST_PATH" >&2
+  exit 1
+fi
+
+mkdir -p "$AGENTS_DIR"
+(umask 077 && mkdir -p "$DATA_DIR" "$LOG_DIR")
 chmod 0700 "$DATA_DIR" "$LOG_DIR"
 
-cat > "$PLIST_PATH" <<EOF
+TMP_PLIST="$(mktemp "${AGENTS_DIR}/.display-guard.plist.XXXXXX")"
+trap 'rm -f "$TMP_PLIST"' EXIT HUP INT TERM
+chmod 0600 "$TMP_PLIST"
+
+cat > "$TMP_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -122,7 +150,17 @@ cat > "$PLIST_PATH" <<EOF
 </plist>
 EOF
 
-/usr/bin/plutil -lint "$PLIST_PATH" >/dev/null
+if ! /usr/bin/plutil -lint "$TMP_PLIST" >/dev/null; then
+  rm -f "$TMP_PLIST"
+  exit 1
+fi
+if [ -L "$PLIST_PATH" ]; then
+  rm -f "$TMP_PLIST"
+  printf 'install-launchagent: refusing symlink plist target: %s\n' "$PLIST_PATH" >&2
+  exit 1
+fi
+mv -f "$TMP_PLIST" "$PLIST_PATH"
+trap - EXIT HUP INT TERM
 
 UID_NUM="$(id -u)"
 launchctl bootout "gui/${UID_NUM}/${LABEL}" 2>/dev/null || true

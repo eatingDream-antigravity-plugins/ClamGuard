@@ -2,10 +2,11 @@ use crate::i18n::{parse_lang_tag, Lang};
 use crate::mcp::telemetry::{summarize_for_model, TelemetryEngine};
 use crate::platform::display_ffi::{clamp_percent, DisplayBackend};
 use crate::platform::macos::ProbeBackend;
-use crate::state::SettingsPatch;
+use crate::state::{read_bounded_regular_file, SettingsPatch, MAX_PANEL_HTML_BYTES};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
@@ -96,10 +97,15 @@ impl HtmlLoader {
     }
 
     pub fn load(&self) -> Arc<CompiledTemplate> {
+        let euid = unsafe { libc::geteuid() };
         let mut found: Option<(&PathBuf, u128, u64)> = None;
         for p in &self.candidate_paths {
-            if let Ok(meta) = fs::metadata(p) {
-                if meta.is_file() {
+            if let Ok(meta) = fs::symlink_metadata(p) {
+                if !meta.file_type().is_symlink()
+                    && meta.is_file()
+                    && meta.uid() == euid
+                    && meta.len() <= MAX_PANEL_HTML_BYTES as u64
+                {
                     let size = meta.len();
                     let mtime_ns = meta
                         .modified()
@@ -123,7 +129,7 @@ impl HtmlLoader {
                 return Arc::clone(&c.template);
             }
         }
-        match fs::read_to_string(path) {
+        match read_bounded_regular_file(path, MAX_PANEL_HTML_BYTES) {
             Ok(text) if !text.is_empty() => {
                 let template = Arc::new(CompiledTemplate::from_html(&text));
                 *cache = Some(CachedHtml {
@@ -628,5 +634,34 @@ mod tests {
         assert_eq!(zh_err["structuredContent"]["errorKind"], "lock_failed");
         assert_eq!(zh_err["structuredContent"]["errorDetail"], "raw stderr");
         assert_eq!(zh_err["content"][0]["text"], "锁屏失败。");
+    }
+
+    #[test]
+    fn html_loader_rejects_symlinks_and_oversized_files() {
+        let dir =
+            std::env::temp_dir().join(format!("mac-clamshell-html-loader-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let real_html = dir.join("real.html");
+        fs::write(&real_html, "<html>custom/*__MAC_CLAMSHELL_BOOT__*/</html>").unwrap();
+        let sym_html = dir.join("sym.html");
+        std::os::unix::fs::symlink(&real_html, &sym_html).unwrap();
+
+        let loader_sym = HtmlLoader::new(Some(sym_html));
+        let rendered_sym = loader_sym.load().render_with_boot("boot();");
+        assert!(!rendered_sym.contains("<html>custom"));
+
+        let huge_html = dir.join("huge.html");
+        let huge = format!(
+            "<html>{}/*__MAC_CLAMSHELL_BOOT__*/</html>",
+            "x".repeat(MAX_PANEL_HTML_BYTES + 128)
+        );
+        fs::write(&huge_html, huge).unwrap();
+        let loader_huge = HtmlLoader::new(Some(huge_html));
+        let rendered_huge = loader_huge.load().render_with_boot("boot();");
+        assert!(!rendered_huge.contains(&"x".repeat(1024)));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

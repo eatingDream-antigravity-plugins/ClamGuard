@@ -44,6 +44,7 @@ pub struct MacOsFanSensorSource {
 impl FanSensorSource for MacOsFanSensorSource {
     fn sample(&self, fresh: bool) -> FanTelemetry {
         self.sample_with(fresh, || {
+            #[cfg(any(test, feature = "test-mocks"))]
             if let Ok(mock) = std::env::var("MAC_CLAMSHELL_MOCK_FAN") {
                 return mock_sample(mock.trim());
             }
@@ -218,6 +219,7 @@ impl Sensors {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_sample(raw: &str) -> FanTelemetry {
     let mut managers = Vec::new();
     let mut monitors = Vec::new();

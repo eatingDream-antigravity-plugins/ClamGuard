@@ -11,6 +11,10 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub const VALID_MODES: &[&str] = &["auto", "eco", "utility", "strict", "normal"];
 pub const VALID_AC_PROFILES: &[&str] = &["utility", "eco"];
+pub const MAX_SETTINGS_FILE_BYTES: usize = 64 * 1024;
+pub const MAX_STATE_FILE_BYTES: usize = 16 * 1024;
+pub const MAX_PLIST_FILE_BYTES: usize = 64 * 1024;
+pub const MAX_PANEL_HTML_BYTES: usize = 256 * 1024;
 
 pub fn default_data_dir() -> PathBuf {
     if let Ok(v) = std::env::var("MAC_CLAMSHELL_DATA_DIR") {
@@ -32,7 +36,8 @@ pub fn default_data_dir() -> PathBuf {
                 .join("mac-clamshell-mcp");
         }
     }
-    std::env::temp_dir().join("mac-clamshell-mcp")
+    let uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("mac-clamshell-mcp-{uid}"))
 }
 
 pub fn abbreviate_home(path: &Path) -> String {
@@ -58,21 +63,46 @@ pub fn resolve_data_dir(cli_override: Option<&Path>) -> PathBuf {
     }
 }
 
+fn check_owned_dir_meta(dir: &Path, meta: &fs::Metadata) -> io::Result<()> {
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing symlink directory: {}", dir.display()),
+        ));
+    }
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("path is not a directory: {}", dir.display()),
+        ));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing directory owned by uid {} (expected {}): {}",
+                meta.uid(),
+                euid,
+                dir.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub fn ensure_owned_dir(dir: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => check_owned_dir_meta(dir, &meta),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir_all(dir),
+        Err(e) => Err(e),
+    }
+}
+
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
     match fs::symlink_metadata(dir) {
         Ok(meta) => {
-            if meta.file_type().is_symlink() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("refusing symlink directory: {}", dir.display()),
-                ));
-            }
-            if !meta.is_dir() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    format!("path is not a directory: {}", dir.display()),
-                ));
-            }
+            check_owned_dir_meta(dir, &meta)?;
             if (meta.permissions().mode() & 0o777) != 0o700 {
                 fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
             }
@@ -241,14 +271,46 @@ impl SettingsPatch {
     }
 }
 
-fn read_regular_to_string(path: &Path) -> io::Result<String> {
-    let mut file = OpenOptions::new()
+pub fn read_bounded_regular_file(path: &Path, max_bytes: usize) -> io::Result<String> {
+    let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
-    Ok(raw)
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("refusing non-regular file: {}", path.display()),
+        ));
+    }
+    let euid = unsafe { libc::geteuid() };
+    if meta.uid() != euid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing file owned by uid {} (expected {}): {}",
+                meta.uid(),
+                euid,
+                path.display()
+            ),
+        ));
+    }
+    if meta.len() > max_bytes as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {max_bytes} byte limit: {}", path.display()),
+        ));
+    }
+    let limit = (max_bytes as u64).saturating_add(1);
+    let mut buf = Vec::with_capacity((meta.len() as usize).min(max_bytes));
+    file.take(limit).read_to_end(&mut buf)?;
+    if buf.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file exceeds {max_bytes} byte limit: {}", path.display()),
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn reject_if_symlink(path: &Path) -> io::Result<()> {
@@ -364,7 +426,7 @@ fn parse_settings_object(
 
 pub fn try_read_settings(data_dir: &Path) -> Result<Settings, String> {
     let path = settings_path(data_dir);
-    let raw = match read_regular_to_string(&path) {
+    let raw = match read_bounded_regular_file(&path, MAX_SETTINGS_FILE_BYTES) {
         Ok(s) => s,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
         Err(e) => return Err(format!("failed to read settings.json: {e}")),
@@ -388,7 +450,7 @@ pub fn write_settings(data_dir: &Path, patch: &SettingsPatch) -> io::Result<Sett
     let _lock = FileLock::acquire_path(&data_dir.join("settings.lock"), true)?;
     let path = settings_path(data_dir);
     reject_if_symlink(&path)?;
-    let (mut disk_map, mut next) = match read_regular_to_string(&path) {
+    let (mut disk_map, mut next) = match read_bounded_regular_file(&path, MAX_SETTINGS_FILE_BYTES) {
         Ok(raw) => {
             let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
                 io::Error::new(
@@ -580,7 +642,7 @@ impl From<&GuardState> for DisplayGuardSummary {
 
 pub fn load_guard_state(data_dir: &Path) -> GuardState {
     let path = guard_state_path(data_dir);
-    match fs::read_to_string(&path) {
+    match read_bounded_regular_file(&path, MAX_STATE_FILE_BYTES) {
         Ok(raw) => serde_json::from_str::<GuardState>(&raw).unwrap_or_default(),
         Err(_) => GuardState::default(),
     }
@@ -588,7 +650,7 @@ pub fn load_guard_state(data_dir: &Path) -> GuardState {
 
 pub fn load_guard_state_opt(data_dir: &Path) -> Option<GuardState> {
     let path = guard_state_path(data_dir);
-    let raw = fs::read_to_string(&path).ok()?;
+    let raw = read_bounded_regular_file(&path, MAX_STATE_FILE_BYTES).ok()?;
     serde_json::from_str::<GuardState>(&raw).ok()
 }
 
@@ -598,10 +660,7 @@ pub fn save_guard_state(data_dir: &Path, state: &GuardState) -> io::Result<()> {
     atomic_write(&guard_state_path(data_dir), format!("{body}\n").as_bytes())
 }
 
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        ensure_private_dir(parent)?;
-    }
+fn atomic_write_raw(path: &Path, bytes: &[u8]) -> io::Result<()> {
     reject_if_symlink(path)?;
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("state");
@@ -621,6 +680,20 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     write_res
+}
+
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    atomic_write_raw(path, bytes)
+}
+
+pub fn atomic_write_in_owned_dir(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_owned_dir(parent)?;
+    }
+    atomic_write_raw(path, bytes)
 }
 
 pub struct FileLock {
@@ -1094,6 +1167,61 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_bounded_regular_file_and_owned_dir_enforce_limits_and_no_follow() {
+        let dir =
+            std::env::temp_dir().join(format!("mac-clamshell-bounded-read-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_private_dir(&dir).unwrap();
+
+        let small = dir.join("small.txt");
+        atomic_write(&small, b"hello").unwrap();
+        assert_eq!(read_bounded_regular_file(&small, 5).unwrap(), "hello");
+
+        let too_big = dir.join("big.txt");
+        atomic_write(&too_big, b"123456").unwrap();
+        assert_eq!(
+            read_bounded_regular_file(&too_big, 5).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&small, &link).unwrap();
+        assert!(read_bounded_regular_file(&link, 64).is_err());
+
+        // Directory is rejected as non-regular file
+        assert_eq!(
+            read_bounded_regular_file(&dir, 64).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        // FIFO is rejected cleanly via O_NONBLOCK + is_file() without blocking
+        let fifo = dir.join("pipe.fifo");
+        let c_fifo = std::ffi::CString::new(fifo.to_string_lossy().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            read_bounded_regular_file(&fifo, 64).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        // atomic_write_in_owned_dir keeps 0o755 parent mode while writing 0o600 file
+        let shared_dir = dir.join("shared-agents");
+        fs::create_dir(&shared_dir).unwrap();
+        fs::set_permissions(&shared_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let plist = shared_dir.join("test.plist");
+        atomic_write_in_owned_dir(&plist, b"<plist/>").unwrap();
+        assert_eq!(
+            fs::metadata(&shared_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

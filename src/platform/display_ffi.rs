@@ -1,7 +1,9 @@
 use std::ffi::CString;
 #[cfg(all(target_os = "macos", not(test)))]
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+#[cfg(any(test, feature = "test-mocks"))]
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +43,7 @@ pub fn level_f64_to_percent(level: f64) -> Option<u8> {
     Some((level.clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Clone, Debug)]
 struct MockDisplayState {
     mode: String,
@@ -49,6 +52,7 @@ struct MockDisplayState {
     locked: bool,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_display_mode() -> Option<String> {
     if let Ok(m) = std::env::var("MAC_CLAMSHELL_MOCK_DISPLAY") {
         let t = m.trim();
@@ -70,11 +74,13 @@ fn mock_display_mode() -> Option<String> {
     None
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_state_cell() -> &'static Mutex<Option<MockDisplayState>> {
     static MOCK: OnceLock<Mutex<Option<MockDisplayState>>> = OnceLock::new();
     MOCK.get_or_init(|| Mutex::new(None))
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn with_mock_display<R>(f: impl FnOnce(&mut MockDisplayState) -> R) -> Option<R> {
     let mode = mock_display_mode()?;
     let mut guard = mock_state_cell().lock().unwrap_or_else(|e| e.into_inner());
@@ -328,6 +334,7 @@ mod darwin {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_lock_screen_for_state(st: &mut MockDisplayState) -> Result<LockScreenOutcome, String> {
     match st.mode.as_str() {
         "fail_lock" => Err("mock lock screen failed".to_string()),
@@ -423,6 +430,7 @@ pub struct MacOsDisplayBackend;
 
 impl DisplayBackend for MacOsDisplayBackend {
     fn get_displays(&self) -> (Vec<u32>, Vec<u32>) {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
             "none" | "desktop" | "docked" => (Vec::new(), vec![2]),
             _ => (vec![1], Vec::new()),
@@ -440,6 +448,7 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn is_asleep(&self, display_id: u32) -> Option<bool> {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
             "none" | "desktop" | "docked" | "unknown_sleep" => None,
             "asleep" => Some(true),
@@ -459,6 +468,7 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn get_brightness(&self, display_id: u32) -> Option<f32> {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
             "none" | "desktop" | "docked" => None,
             _ => Some(st.level),
@@ -477,6 +487,7 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn set_brightness(&self, display_id: u32, level: f32) -> bool {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(|st| match st.mode.as_str() {
             "none" | "desktop" | "docked" | "fail_set" => false,
             _ => {
@@ -501,6 +512,7 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn sleep_display_now(&self) -> bool {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(|st| {
             st.asleep = true;
             true
@@ -518,6 +530,7 @@ impl DisplayBackend for MacOsDisplayBackend {
     }
 
     fn lock_screen_now(&self) -> Result<LockScreenOutcome, String> {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Some(res) = with_mock_display(mock_lock_screen_for_state) {
             return res;
         }
