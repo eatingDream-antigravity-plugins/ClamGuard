@@ -4,7 +4,10 @@ use crate::policy::{
     compute_policy, format_profile_name, format_topology_compact, policy_settings_signature,
     state_signature,
 };
-use crate::state::{atomic_write, ensure_private_dir, read_settings, settings_path, sha256_hex_16};
+use crate::state::{
+    atomic_write, ensure_private_dir, read_bounded_regular_file, read_settings, settings_path,
+    sha256_hex_16, MAX_STATE_FILE_BYTES,
+};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read};
@@ -108,9 +111,11 @@ fn sanitize_id(raw: &str) -> String {
 }
 
 fn mtime_secs(path: &Path) -> Option<u64> {
-    fs::metadata(path)
-        .ok()?
-        .modified()
+    let meta = fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return None;
+    }
+    meta.modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -163,7 +168,8 @@ pub fn evaluate_hook<P: ProbeBackend>(
     let state_file = state_dir.join(format!("{safe_id}.state"));
     let settings_file = settings_path(data_dir);
 
-    let state_raw = fs::read_to_string(&state_file).unwrap_or_default();
+    let state_raw =
+        read_bounded_regular_file(&state_file, MAX_STATE_FILE_BYTES).unwrap_or_default();
     let mut state_lines = state_raw.lines();
     let prev_sig = state_lines.next().unwrap_or("").trim().to_string();
     let prev_policy_settings_sig = state_lines

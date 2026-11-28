@@ -781,6 +781,7 @@ pub struct MacOsProbeBackend {
     low_power: ProbeCache<Option<String>>,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_value(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
@@ -799,6 +800,7 @@ fn probe_lid_from_ioreg(ok: bool, out: &str) -> Option<LidProbe> {
 }
 
 fn probe_lid() -> Option<LidProbe> {
+    #[cfg(any(test, feature = "test-mocks"))]
     if let Some(mock) = mock_value("MAC_CLAMSHELL_MOCK_LID") {
         let trimmed = mock.trim();
         let sensor_absent = trimmed.eq_ignore_ascii_case("desktop");
@@ -823,6 +825,7 @@ fn probe_lid() -> Option<LidProbe> {
 }
 
 fn probe_power() -> Option<PowerProbe> {
+    #[cfg(any(test, feature = "test-mocks"))]
     if let Some(mock) = mock_value("MAC_CLAMSHELL_MOCK_POWER") {
         let pct = mock_value("MAC_CLAMSHELL_MOCK_BATT").and_then(|v| v.trim().parse().ok());
         return Some((mock, pct, String::new()));
@@ -831,6 +834,7 @@ fn probe_power() -> Option<PowerProbe> {
     ok.then(|| parse_pmset_batt(&out))
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_thermal() -> Option<ThermalProbe> {
     let therm = mock_value("MAC_CLAMSHELL_MOCK_THERM");
     let pressure = mock_value("MAC_CLAMSHELL_MOCK_THERMAL_PRESSURE");
@@ -858,6 +862,7 @@ fn sample_thermal_sources(
 }
 
 fn probe_thermal() -> Option<ThermalProbe> {
+    #[cfg(any(test, feature = "test-mocks"))]
     if let Some(mock) = mock_thermal() {
         return Some(mock);
     }
@@ -877,11 +882,13 @@ fn native_thermal_pressure() -> Option<&'static str> {
     None
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 fn mock_host_enabled() -> bool {
     std::env::var("MAC_CLAMSHELL_MOCK_HOST").ok().as_deref() == Some("1")
 }
 
 fn probe_low_power() -> Option<String> {
+    #[cfg(any(test, feature = "test-mocks"))]
     if mock_host_enabled() {
         return Some("0".to_string());
     }
@@ -937,7 +944,11 @@ impl MacOsProbeBackend {
 impl ProbeBackend for MacOsProbeBackend {
     fn static_host(&self) -> StaticHostInfo {
         static HOST: OnceLock<StaticHostInfo> = OnceLock::new();
+        #[cfg(any(test, feature = "test-mocks"))]
         let mut base = HOST.get_or_init(Self::compute_static_host).clone();
+        #[cfg(not(any(test, feature = "test-mocks")))]
+        let base = HOST.get_or_init(Self::compute_static_host).clone();
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Ok(mock_topo) = std::env::var("MAC_CLAMSHELL_MOCK_TOPOLOGY") {
             let trimmed = mock_topo.trim();
             if let Some(rest) = trimmed.strip_prefix("intel:") {
@@ -957,6 +968,7 @@ impl ProbeBackend for MacOsProbeBackend {
     }
 
     fn lid_closed_fast(&self) -> Option<bool> {
+        #[cfg(any(test, feature = "test-mocks"))]
         if let Ok(mock) = std::env::var("MAC_CLAMSHELL_MOCK_LID") {
             return match mock.trim() {
                 "closed" => Some(true),
@@ -991,9 +1003,11 @@ impl ProbeBackend for MacOsProbeBackend {
     }
 
     fn thermal_pressure_fast(&self) -> String {
-        mock_thermal()
-            .map(|(_, pressure, _)| pressure)
-            .unwrap_or_else(|| native_thermal_pressure().unwrap_or("unknown").to_string())
+        #[cfg(any(test, feature = "test-mocks"))]
+        if let Some((_, pressure, _)) = mock_thermal() {
+            return pressure;
+        }
+        native_thermal_pressure().unwrap_or("unknown").to_string()
     }
 
     fn probe_hardware(&self) -> HardwareProbe {
@@ -1036,23 +1050,29 @@ impl MacOsProbeBackend {
             || low_power_mode == "unknown";
 
         #[cfg(target_os = "macos")]
-        let (memory, load_avg, uptime_seconds) = if mock_host_enabled() {
-            (
-                MemorySummary {
-                    total_gb: 32.0,
-                    used_gb: 14.4,
-                    compressed_gb: 1.2,
-                    used_pct: 45,
-                },
-                [1.2, 1.05, 0.95],
-                7200,
-            )
-        } else {
-            (
-                native::memory_summary(),
-                native::load_avg(),
-                native::uptime_seconds(),
-            )
+        let (memory, load_avg, uptime_seconds) = {
+            #[cfg(any(test, feature = "test-mocks"))]
+            let use_mock = mock_host_enabled();
+            #[cfg(not(any(test, feature = "test-mocks")))]
+            let use_mock = false;
+            if use_mock {
+                (
+                    MemorySummary {
+                        total_gb: 32.0,
+                        used_gb: 14.4,
+                        compressed_gb: 1.2,
+                        used_pct: 45,
+                    },
+                    [1.2, 1.05, 0.95],
+                    7200,
+                )
+            } else {
+                (
+                    native::memory_summary(),
+                    native::load_avg(),
+                    native::uptime_seconds(),
+                )
+            }
         };
         #[cfg(not(target_os = "macos"))]
         let (memory, load_avg, uptime_seconds) = (

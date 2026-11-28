@@ -103,10 +103,22 @@ reload_antigravity_mcp() {
   fi
   if [ -n "${ANTIGRAVITY_CSRF_TOKEN:-}" ]; then
     ls_addr="${ANTIGRAVITY_LS_ADDRESS:-localhost:5387}"
-    if curl -sf -H "Content-Type: application/json" \
-      -H "x-codeium-csrf-token: ${ANTIGRAVITY_CSRF_TOKEN}" \
-      -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
-      "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
+    clean_addr="$(printf '%s' "$ls_addr" | LC_ALL=C tr -d '[:cntrl:]')"
+    if [ "$clean_addr" != "$ls_addr" ] || \
+      ! printf '%s\n' "$ls_addr" | LC_ALL=C grep -Eq '^(localhost|127\.0\.0\.1|\[::1\]):[0-9]{1,5}$'; then
+      printf 'Note: ignoring non-loopback ANTIGRAVITY_LS_ADDRESS; restart Clam Guard in Customizations > Installed.\n'
+      return 0
+    fi
+    clean_token="$(printf '%s' "$ANTIGRAVITY_CSRF_TOKEN" | LC_ALL=C tr -d '\000-\037\177\"\\')"
+    if [ "$clean_token" != "$ANTIGRAVITY_CSRF_TOKEN" ]; then
+      printf 'Note: ignoring malformed ANTIGRAVITY_CSRF_TOKEN; restart Clam Guard in Customizations > Installed.\n'
+      return 0
+    fi
+    if printf 'header = "Content-Type: application/json"\nheader = "x-codeium-csrf-token: %s"\n' \
+        "$ANTIGRAVITY_CSRF_TOKEN" | \
+      curl -sf --connect-timeout 2 --max-time 5 -K - \
+        -d '{"serverName":"mac-clamshell-mcp_mac-clamshell-mcp"}' \
+        "http://${ls_addr}/exa.language_server_pb.LanguageServerService/RefreshMcpServers" >/dev/null 2>&1; then
       printf 'Refreshed live Antigravity MCP server (close & reopen any open Clam Guard panel tab).\n'
     else
       printf 'Note: could not reach Antigravity RefreshMcpServers; restart Clam Guard in Customizations > Installed.\n'

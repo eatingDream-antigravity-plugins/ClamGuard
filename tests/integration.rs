@@ -1,10 +1,17 @@
-use serde_json::{json, Value};
+#[cfg(feature = "test-mocks")]
+use serde_json::json;
+use serde_json::Value;
 use std::fs;
+#[cfg(feature = "test-mocks")]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(feature = "test-mocks")]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(feature = "test-mocks")]
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-mocks")]
 use std::time::{Duration, Instant};
 
 static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -22,13 +29,17 @@ fn bin_path() -> &'static str {
     env!("CARGO_BIN_EXE_mac-clamshell-mcp")
 }
 
+#[cfg(feature = "test-mocks")]
 const UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
+#[cfg(feature = "test-mocks")]
 const UI_MIME: &str = "text/html;profile=mcp-app";
 
+#[cfg(feature = "test-mocks")]
 fn app_capabilities() -> Value {
     json!({"extensions": {UI_EXTENSION: {"mimeTypes": [UI_MIME]}}})
 }
 
+#[cfg(feature = "test-mocks")]
 fn mock_command(dir: &std::path::Path, app: &str) -> Command {
     let mut command = Command::new(bin_path());
     command
@@ -47,6 +58,7 @@ fn mock_command(dir: &std::path::Path, app: &str) -> Command {
     command
 }
 
+#[cfg(feature = "test-mocks")]
 fn mcp_batch(mut command: Command, requests: &[(&str, Value)]) -> Vec<Value> {
     let mut child = command
         .stdin(Stdio::piped())
@@ -78,6 +90,7 @@ fn mcp_batch(mut command: Command, requests: &[(&str, Value)]) -> Vec<Value> {
     responses
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_status_json_and_brightness_closed_lid_safe_target() {
     let dir = temp_data_dir("status");
@@ -185,6 +198,7 @@ fn cli_run_wrapper_enforces_concurrency_vars_and_normal_fast_path() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_hook_and_mcp_stdio_end_to_end() {
     let dir = temp_data_dir("mcp");
@@ -374,6 +388,7 @@ fn cli_hook_and_mcp_stdio_end_to_end() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_lock_json_mock_and_error_path() {
     let dir = temp_data_dir("lock");
@@ -411,6 +426,7 @@ fn cli_lock_json_mock_and_error_path() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn mcp_plain_host_gets_supported_version_and_public_tools_only() {
     let dir = temp_data_dir("mcp-plain");
@@ -440,6 +456,7 @@ fn mcp_plain_host_gets_supported_version_and_public_tools_only() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn mcp_and_cli_require_verified_session_lock_after_display_sleep() {
     let dir = temp_data_dir("pmset-fallback");
@@ -485,6 +502,7 @@ fn mcp_and_cli_require_verified_session_lock_after_display_sleep() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_brightness_defers_unknown_lid_and_unconfirmed_awake_state() {
     let dir = temp_data_dir("brightness-unknown");
@@ -522,6 +540,7 @@ fn cli_brightness_defers_unknown_lid_and_unconfirmed_awake_state() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_daemon_refuses_when_another_process_holds_the_guard_lock() {
     let dir = temp_data_dir("daemon-contention");
@@ -553,6 +572,7 @@ fn cli_daemon_refuses_when_another_process_holds_the_guard_lock() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_guard_uninstalls_fixture_without_mutating_live_launchd() {
     let dir = temp_data_dir("guard-uninstall");
@@ -574,6 +594,7 @@ fn cli_guard_uninstalls_fixture_without_mutating_live_launchd() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn concurrent_mcp_settings_updates_survive_across_processes() {
     let dir = temp_data_dir("settings");
@@ -606,6 +627,7 @@ fn concurrent_mcp_settings_updates_survive_across_processes() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
     let dir = temp_data_dir("fans");
@@ -755,6 +777,7 @@ fn fan_samples_are_read_only_in_cli_and_mcp_with_bilingual_text() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn cli_brightness_open_override_cannot_bypass_real_lid_probe_and_docked_display_is_accurate() {
     let dir = temp_data_dir("p1-lid-display");
@@ -799,6 +822,7 @@ fn cli_brightness_open_override_cannot_bypass_real_lid_probe_and_docked_display_
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn mcp_enforces_session_tools_strict_apps_batching_and_lock_verification_status() {
     let dir = temp_data_dir("p1-mcp-proto");
@@ -910,6 +934,7 @@ fn mcp_enforces_session_tools_strict_apps_batching_and_lock_verification_status(
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn surviving_mcp_server_takes_over_daemon_lock_and_unloaded_plist_reports_idle() {
     let dir = temp_data_dir("p1-takeover");
@@ -1167,6 +1192,7 @@ fn sanitization_guard_catches_synthetic_tokens_without_echoing_and_fails_closed(
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(feature = "test-mocks")]
 #[test]
 fn mcp_stdio_caps_oversize_lines_and_freezes_session_on_duplicate_initialize() {
     let dir = temp_data_dir("mcp-hardening");
@@ -1218,4 +1244,114 @@ fn mcp_stdio_caps_oversize_lines_and_freezes_session_on_duplicate_initialize() {
     let status = child.wait().unwrap();
     assert!(status.success());
     fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(not(feature = "test-mocks"))]
+#[test]
+fn production_binary_ignores_mock_env_vars() {
+    let dir = temp_data_dir("prod-no-mocks");
+    let out = Command::new(bin_path())
+        .args(["status", "--json", "--data-dir"])
+        .arg(&dir)
+        .env("MAC_CLAMSHELL_MOCK_FAN", "yield:BogusMockController:9999")
+        .env("MAC_CLAMSHELL_MOCK_TOPOLOGY", "intel:99")
+        .env("MAC_CLAMSHELL_MOCK_HOST", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_ne!(v["fan"]["controller"], "BogusMockController");
+    assert_ne!(v["cpuTopology"]["total"], 99);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn install_scripts_enforce_security_hardening() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let install_sh = fs::read_to_string(repo_root.join("scripts/install.sh")).unwrap();
+    let install_plugin_sh =
+        fs::read_to_string(repo_root.join("scripts/install-plugin.sh")).unwrap();
+    let install_agent_sh =
+        fs::read_to_string(repo_root.join("scripts/install-launchagent.sh")).unwrap();
+
+    // Structural checks on install.sh & install-plugin.sh
+    for (name, body) in [
+        ("scripts/install.sh", &install_sh),
+        ("scripts/install-plugin.sh", &install_plugin_sh),
+    ] {
+        assert!(
+            body.contains("^(localhost|127\\.0\\.0\\.1|\\[::1\\]):[0-9]{1,5}$"),
+            "{name} must validate ANTIGRAVITY_LS_ADDRESS against loopback regex"
+        );
+        assert!(
+            body.contains("curl -sf --connect-timeout 2 --max-time 5 -K -"),
+            "{name} must pass CSRF header via curl -K - with timeouts"
+        );
+        assert!(
+            !body.contains("-H \"x-codeium-csrf-token"),
+            "{name} must never pass x-codeium-csrf-token via -H argv"
+        );
+    }
+    assert!(install_sh.contains("^v[0-9]+\\.[0-9]+\\.[0-9]+([-.][0-9A-Za-z.]+)?$"));
+    assert!(install_sh.contains("^[0-9a-f]{64}$"));
+    assert!(install_sh.contains("find \"$STAGE\" -type l"));
+
+    // Structural checks on install-launchagent.sh
+    assert!(install_agent_sh.contains("[ -L \"$PLIST_PATH\" ]"));
+    assert!(install_agent_sh.contains("[:cntrl:]"));
+    assert!(install_agent_sh.contains("umask 077"));
+    assert!(install_agent_sh.contains("mktemp"));
+    assert!(install_agent_sh.contains("chmod 0600"));
+    assert!(install_agent_sh.contains("/usr/bin/plutil -lint \"$TMP_PLIST\""));
+    assert!(install_agent_sh.contains("mv -f \"$TMP_PLIST\" \"$PLIST_PATH\""));
+
+    // Behavioral checks: install.sh rejects traversal versions before network
+    let bad_ver = Command::new("sh")
+        .arg(repo_root.join("scripts/install.sh"))
+        .args(["--version", "v1.0.0/../../evil"])
+        .output()
+        .unwrap();
+    assert_eq!(bad_ver.status.code(), Some(1));
+
+    // Behavioral checks: install-launchagent.sh rejects XML quotes & symlinked plist target
+    let dir = temp_data_dir("install-agent-sec");
+    let fake_home = dir.join("home");
+    let agents_dir = fake_home.join("Library/LaunchAgents");
+    fs::create_dir_all(&agents_dir).unwrap();
+    let target_file = dir.join("victim.txt");
+    fs::write(&target_file, "untouched").unwrap();
+    let plist_link = agents_dir.join("dev.mac-clamshell-mcp.display-guard.plist");
+    std::os::unix::fs::symlink(&target_file, &plist_link).unwrap();
+
+    let sym_res = Command::new("sh")
+        .arg(repo_root.join("scripts/install-launchagent.sh"))
+        .env("HOME", &fake_home)
+        .args(["--bin", "/bin/echo", "--data-dir"])
+        .arg(dir.join("data"))
+        .output()
+        .unwrap();
+    assert_eq!(sym_res.status.code(), Some(1));
+    assert_eq!(fs::read_to_string(&target_file).unwrap(), "untouched");
+
+    let quote_res = Command::new("sh")
+        .arg(repo_root.join("scripts/install-launchagent.sh"))
+        .env("HOME", &fake_home)
+        .args(["--bin", "/bin/echo", "--data-dir", "/tmp/bad'dir"])
+        .output()
+        .unwrap();
+    assert_eq!(quote_res.status.code(), Some(2));
+
+    let nl_res = Command::new("sh")
+        .arg(repo_root.join("scripts/install-launchagent.sh"))
+        .env("HOME", &fake_home)
+        .args(["--bin", "/bin/echo", "--data-dir", "/tmp/bad\ndir"])
+        .output()
+        .unwrap();
+    assert_eq!(nl_res.status.code(), Some(2));
+
+    let _ = fs::remove_dir_all(&dir);
 }

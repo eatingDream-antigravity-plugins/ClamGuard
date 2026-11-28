@@ -98,7 +98,11 @@ pub fn read_display_info(
         (None, false)
     };
 
+    #[cfg(any(test, feature = "test-mocks"))]
     let mut saved_percent = level_f64_to_percent(guard_state.user_intent.saved_brightness);
+    #[cfg(not(any(test, feature = "test-mocks")))]
+    let saved_percent = level_f64_to_percent(guard_state.user_intent.saved_brightness);
+    #[cfg(any(test, feature = "test-mocks"))]
     if let Ok(mock) = std::env::var("MAC_CLAMSHELL_MOCK_BRIGHTNESS") {
         if let Ok(v) = mock.trim().parse::<f64>() {
             if let Ok(pct) = clamp_percent(v) {
